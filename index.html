@@ -3,13 +3,32 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Lead Scraper</title>
+  <title>Chorizo Lead Scraper</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            chorizo: {
+              DEFAULT: '#DC4A4A',
+              hover: '#C43E3E',
+            },
+            cream: '#F9F5F3',
+          }
+        }
+      }
+    }
+  </script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>Lead Scraper</h1>
+      <div class="logo-title">
+        <img src="logo.png" alt="Chorizo" class="chorizo-logo">
+        <h1>Lead Scraper</h1>
+      </div>
       <div id="api-usage" class="api-usage">Loading...</div>
     </header>
 
@@ -37,20 +56,16 @@
           <button id="enrich-btn" class="btn btn-hunter" disabled>
             <span class="hunter-logo">H</span>
             Enrich with Hunter
-            <span class="coming-soon">Coming Soon</span>
+            <span class="badge-soon">Soon</span>
           </button>
         </div>
       </div>
 
       <div class="filters-bar">
-        <input type="text" id="search-filter" placeholder="Search by name, address, category..." class="search-input">
+        <input type="text" id="search-filter" placeholder="Search by name, city, category..." class="search-input">
         <select id="category-filter" class="filter-select">
           <option value="">All Categories</option>
         </select>
-        <div class="view-toggle">
-          <button id="simple-view-btn" class="btn btn-small active">Simple</button>
-          <button id="full-view-btn" class="btn btn-small">Full</button>
-        </div>
         <button id="delete-selected-btn" class="btn btn-danger btn-small hidden">Delete Selected</button>
       </div>
 
@@ -60,7 +75,7 @@
             <tr>
               <th class="checkbox-col"><input type="checkbox" id="select-all"></th>
               <th class="sortable" data-sort="name">Name</th>
-              <th class="sortable" data-sort="address">Address</th>
+              <th class="sortable" data-sort="address">City</th>
               <th class="sortable" data-sort="category">Category</th>
               <th class="sortable" data-sort="website">Website</th>
               <th class="sortable" data-sort="rating">Rating</th>

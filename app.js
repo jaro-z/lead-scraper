@@ -6,7 +6,6 @@ let filteredCompanies = [];
 let selectedIds = new Set();
 let sortColumn = 'name';
 let sortDirection = 'asc';
-let viewMode = 'simple';
 
 // DOM Elements
 const dashboardView = document.getElementById('dashboard-view');
@@ -40,9 +39,6 @@ function setupEventListeners() {
   document.getElementById('search-filter').addEventListener('input', debounce(applyFilters, 200));
   document.getElementById('category-filter').addEventListener('change', applyFilters);
 
-  // View toggle
-  document.getElementById('simple-view-btn').addEventListener('click', () => setViewMode('simple'));
-  document.getElementById('full-view-btn').addEventListener('click', () => setViewMode('full'));
 
   // Select all
   document.getElementById('select-all').addEventListener('change', handleSelectAll);
@@ -150,15 +146,26 @@ function renderCompanies() {
     <tr data-id="${c.id}">
       <td><input type="checkbox" class="row-checkbox" ${selectedIds.has(c.id) ? 'checked' : ''}></td>
       <td>${escapeHtml(c.name || '-')}</td>
-      <td>${escapeHtml(c.address || '-')}</td>
+      <td>${escapeHtml(extractCity(c.address))}</td>
       <td>${escapeHtml(formatCategory(c.category))}</td>
-      <td>${c.website ? `<a href="${escapeHtml(c.website)}" target="_blank">Link</a>` : '-'}</td>
+      <td>${c.website ? `<a href="${escapeHtml(c.website)}" target="_blank">${escapeHtml(formatWebsiteUrl(c.website))}</a>` : '-'}</td>
       <td>${c.rating ? `<span class="rating"><span class="star">★</span> ${c.rating}</span>` : '-'}</td>
       <td>${c.rating_count || '-'}</td>
       <td>${formatDate(c.created_at)}</td>
       <td>
-        <button class="view-details-btn" title="View details">👁</button>
-        <button class="delete-btn" title="Delete">×</button>
+        <div class="action-icons">
+          <button class="icon-btn view-btn" title="View details">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+            </svg>
+          </button>
+          <button class="icon-btn delete-btn" title="Delete">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+            </svg>
+          </button>
+        </div>
       </td>
     </tr>
   `).join('');
@@ -170,7 +177,7 @@ function renderCompanies() {
     cb.addEventListener('change', handleRowSelect);
   });
 
-  resultsBody.querySelectorAll('.delete-btn').forEach(btn => {
+  resultsBody.querySelectorAll('.icon-btn.delete-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const id = parseInt(btn.closest('tr').dataset.id);
@@ -178,7 +185,7 @@ function renderCompanies() {
     });
   });
 
-  resultsBody.querySelectorAll('.view-details-btn').forEach(btn => {
+  resultsBody.querySelectorAll('.icon-btn.view-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const id = parseInt(btn.closest('tr').dataset.id);
@@ -363,14 +370,6 @@ function updateCategoryFilter() {
     categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(formatCategory(c))}</option>`).join('');
 }
 
-function setViewMode(mode) {
-  viewMode = mode;
-  document.getElementById('simple-view-btn').classList.toggle('active', mode === 'simple');
-  document.getElementById('full-view-btn').classList.toggle('active', mode === 'full');
-
-  // For now, full view opens the side panel on row click
-  // Simple view is the default table
-}
 
 function handleSelectAll(e) {
   const checked = e.target.checked;
@@ -541,6 +540,46 @@ function formatCategory(category) {
   return category
     .replace(/_/g, ' ')
     .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function extractCity(address) {
+  if (!address) return '-';
+  // Try to extract city from address
+  // Common formats: "Street 123, City, Country" or "Street 123, 110 00 City, Country"
+  const parts = address.split(',').map(p => p.trim());
+
+  if (parts.length >= 2) {
+    // Look for a part that looks like a city (not a street number, not a postal code)
+    for (let i = 1; i < parts.length; i++) {
+      const part = parts[i];
+      // Skip if it looks like a postal code (starts with number)
+      if (/^\d/.test(part)) {
+        // But extract city after postal code: "110 00 Praha 1" -> "Praha"
+        const match = part.match(/\d+\s*\d*\s+(.+)/);
+        if (match) {
+          // Remove district numbers like "Praha 1" -> "Praha"
+          return match[1].replace(/\s*\d+$/, '').trim();
+        }
+        continue;
+      }
+      // Skip if it's a country (last part, common countries)
+      if (i === parts.length - 1 && /^(czechia|czech republic|germany|austria|poland|hungary|slovakia)/i.test(part)) {
+        continue;
+      }
+      // This is likely the city
+      // Remove district numbers like "Praha 1" -> "Praha"
+      return part.replace(/\s*\d+$/, '').trim();
+    }
+  }
+
+  // Fallback: return first meaningful part
+  return parts[0] || '-';
+}
+
+function formatWebsiteUrl(url) {
+  if (!url) return '';
+  // Remove protocol and www, truncate if too long
+  return url.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '').substring(0, 30) + (url.length > 40 ? '...' : '');
 }
 
 function debounce(fn, delay) {
