@@ -30,13 +30,56 @@ const GRID_SIZES = {
   large: 5    // 5x5 = 25 cells
 };
 
+// Predefined bounds for common locations (avoids needing Geocoding API)
+const LOCATION_BOUNDS = {
+  // Czech cities
+  'praha': { north: 50.1777, south: 49.9419, east: 14.7068, west: 14.2244 },
+  'prague': { north: 50.1777, south: 49.9419, east: 14.7068, west: 14.2244 },
+  'brno': { north: 49.2699, south: 49.1095, east: 16.7269, west: 16.4489 },
+  'ostrava': { north: 49.8822, south: 49.7652, east: 18.3612, west: 18.1432 },
+  'plzen': { north: 49.7806, south: 49.7006, east: 13.4306, west: 13.3106 },
+  'plzeň': { north: 49.7806, south: 49.7006, east: 13.4306, west: 13.3106 },
+  'liberec': { north: 50.8036, south: 50.7236, east: 15.1036, west: 15.0036 },
+  'olomouc': { north: 49.6436, south: 49.5636, east: 17.3036, west: 17.2036 },
+
+  // Countries
+  'czechia': { north: 51.0557, south: 48.5519, east: 18.8592, west: 12.0906 },
+  'czech republic': { north: 51.0557, south: 48.5519, east: 18.8592, west: 12.0906 },
+  'česká republika': { north: 51.0557, south: 48.5519, east: 18.8592, west: 12.0906 },
+  'česko': { north: 51.0557, south: 48.5519, east: 18.8592, west: 12.0906 },
+
+  // Major EU cities
+  'berlin': { north: 52.6755, south: 52.3382, east: 13.7611, west: 13.0884 },
+  'vienna': { north: 48.3231, south: 48.1183, east: 16.5775, west: 16.1826 },
+  'wien': { north: 48.3231, south: 48.1183, east: 16.5775, west: 16.1826 },
+  'warsaw': { north: 52.3679, south: 52.0979, east: 21.1712, west: 20.8512 },
+  'krakow': { north: 50.1179, south: 49.9679, east: 20.0679, west: 19.8179 },
+  'budapest': { north: 47.6131, south: 47.3481, east: 19.3341, west: 18.9261 },
+  'munich': { north: 48.2481, south: 48.0617, east: 11.7225, west: 11.3609 },
+  'münchen': { north: 48.2481, south: 48.0617, east: 11.7225, west: 11.3609 },
+  'amsterdam': { north: 52.4311, south: 52.2781, east: 5.0179, west: 4.7289 },
+  'paris': { north: 48.9021, south: 48.8156, east: 2.4699, west: 2.2241 },
+  'london': { north: 51.6723, south: 51.3849, east: 0.1482, west: -0.3514 },
+  'bratislava': { north: 48.2311, south: 48.0611, east: 17.2111, west: 16.9511 }
+};
+
 async function geocodeLocation(location, apiKey) {
+  // First, check predefined bounds (case-insensitive)
+  const normalizedLocation = location.toLowerCase().trim();
+  if (LOCATION_BOUNDS[normalizedLocation]) {
+    console.log(`Using predefined bounds for: ${location}`);
+    return LOCATION_BOUNDS[normalizedLocation];
+  }
+
+  // Try geocoding API as fallback
   const url = `${GEOCODE_BASE}?address=${encodeURIComponent(location)}&key=${apiKey}`;
   const response = await fetch(url);
   const data = await response.json();
 
   if (data.status !== 'OK' || !data.results.length) {
-    throw new Error(`Could not geocode location: ${location}`);
+    // List available locations in error message
+    const availableLocations = Object.keys(LOCATION_BOUNDS).slice(0, 10).join(', ');
+    throw new Error(`Could not geocode location: ${location}. Try one of these: ${availableLocations}`);
   }
 
   const result = data.results[0];
