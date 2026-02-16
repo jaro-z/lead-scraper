@@ -37,7 +37,7 @@ function setupEventListeners() {
 
   // Filters
   document.getElementById('search-filter').addEventListener('input', debounce(applyFilters, 200));
-  document.getElementById('category-filter').addEventListener('change', applyFilters);
+  document.getElementById('website-filter').addEventListener('change', applyFilters);
 
 
   // Select all
@@ -48,6 +48,12 @@ function setupEventListeners() {
 
   // Export
   document.getElementById('export-btn').addEventListener('click', handleExport);
+
+  // Enrich with Hunter
+  document.getElementById('enrich-btn').addEventListener('click', handleEnrich);
+
+  // AI Waterfall Enrich
+  document.getElementById('waterfall-enrich-btn').addEventListener('click', handleWaterfallEnrich);
 
   // Close panel
   document.getElementById('close-panel').addEventListener('click', () => fullViewPanel.classList.add('hidden'));
@@ -98,7 +104,6 @@ async function loadCompanies(searchId) {
     const res = await fetch(`/api/searches/${searchId}/companies`);
     companies = await res.json();
     filteredCompanies = [...companies];
-    updateCategoryFilter();
     renderCompanies();
   } catch (error) {
     console.error('Error loading companies:', error);
@@ -148,12 +153,19 @@ function renderCompanies() {
       <td>${escapeHtml(c.name || '-')}</td>
       <td>${escapeHtml(extractCity(c.address))}</td>
       <td>${escapeHtml(formatCategory(c.category))}</td>
+      <td>${formatSegmentBadge(c.segment, c.enrichment_source)}</td>
       <td>${c.website ? `<a href="${escapeHtml(c.website)}" target="_blank">${escapeHtml(formatWebsiteUrl(c.website))}</a>` : '-'}</td>
       <td>${c.rating ? `<span class="rating"><span class="star">★</span> ${c.rating}</span>` : '-'}</td>
-      <td>${c.rating_count || '-'}</td>
-      <td>${formatDate(c.created_at)}</td>
+      <td>${c.primary_email ? `<a href="mailto:${escapeHtml(c.primary_email)}" class="email-link">${escapeHtml(c.primary_email)}</a>` : (c.contacts_count > 0 ? `<span class="contacts-badge">${c.contacts_count}</span>` : '-')}</td>
       <td>
         <div class="action-icons">
+          ${c.website && !c.enrichment_source ? `
+          <button class="icon-btn enrich-btn" title="AI Enrich">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
+            </svg>
+          </button>
+          ` : ''}
           <button class="icon-btn view-btn" title="View details">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
@@ -190,6 +202,14 @@ function renderCompanies() {
       e.stopPropagation();
       const id = parseInt(btn.closest('tr').dataset.id);
       showDetails(id);
+    });
+  });
+
+  resultsBody.querySelectorAll('.icon-btn.enrich-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = parseInt(btn.closest('tr').dataset.id);
+      handleSingleEnrich(id, btn);
     });
   });
 }
@@ -346,7 +366,7 @@ function sortCompanies(list) {
 
 function applyFilters() {
   const searchTerm = document.getElementById('search-filter').value.toLowerCase();
-  const category = document.getElementById('category-filter').value;
+  const hasWebsite = document.getElementById('website-filter').checked;
 
   filteredCompanies = companies.filter(c => {
     const matchesSearch = !searchTerm ||
@@ -354,21 +374,14 @@ function applyFilters() {
       (c.address && c.address.toLowerCase().includes(searchTerm)) ||
       (c.category && c.category.toLowerCase().includes(searchTerm));
 
-    const matchesCategory = !category || c.category === category;
+    const matchesWebsite = !hasWebsite || c.website;
 
-    return matchesSearch && matchesCategory;
+    return matchesSearch && matchesWebsite;
   });
 
   renderCompanies();
 }
 
-function updateCategoryFilter() {
-  const categories = [...new Set(companies.map(c => c.category).filter(Boolean))].sort();
-  const select = document.getElementById('category-filter');
-
-  select.innerHTML = '<option value="">All Categories</option>' +
-    categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(formatCategory(c))}</option>`).join('');
-}
 
 
 function handleSelectAll(e) {
@@ -442,7 +455,166 @@ function handleExport() {
   window.location.href = `/api/searches/${currentSearchId}/export`;
 }
 
-function showDetails(id) {
+async function handleEnrich() {
+  // Get companies to enrich (selected or all with websites but no email yet)
+  const toEnrich = selectedIds.size > 0
+    ? companies.filter(c => selectedIds.has(c.id) && c.website && !c.enriched_at)
+    : companies.filter(c => c.website && !c.enriched_at);
+
+  if (!toEnrich.length) {
+    alert('No companies to enrich. Make sure they have websites and haven\'t been enriched yet.');
+    return;
+  }
+
+  if (!confirm(`Find emails for ${toEnrich.length} companies using Hunter.io?\n\nThis uses your Hunter API credits.`)) {
+    return;
+  }
+
+  const btn = document.getElementById('enrich-btn');
+  const originalText = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQb_VzR1613Ir5hKIcvy3ZN41rtf18rvA6qfA&s" alt="Hunter" class="hunter-logo"> Finding emails...';
+
+  let enriched = 0;
+  let totalContacts = 0;
+
+  for (let i = 0; i < toEnrich.length; i++) {
+    const company = toEnrich[i];
+    btn.innerHTML = `<img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQb_VzR1613Ir5hKIcvy3ZN41rtf18rvA6qfA&s" alt="Hunter" class="hunter-logo"> ${i + 1}/${toEnrich.length}...`;
+
+    try {
+      const res = await fetch(`/api/companies/${company.id}/enrich`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.contactsFound > 0) {
+          enriched++;
+          totalContacts += data.contactsFound;
+          // Update local data
+          company.enriched_at = new Date().toISOString();
+          company.contacts_count = data.contactsFound;
+          if (data.primaryContact) {
+            company.primary_email = data.primaryContact.email;
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`Error enriching ${company.name}:`, err);
+    }
+
+    // Small delay between requests
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = originalText;
+
+  alert(`Done! Found ${totalContacts} contacts for ${enriched} companies.`);
+  renderCompanies();
+}
+
+async function handleWaterfallEnrich() {
+  // Get companies to enrich (selected or all with websites but not enriched yet)
+  const toEnrich = selectedIds.size > 0
+    ? companies.filter(c => selectedIds.has(c.id) && c.website && !c.enrichment_source)
+    : companies.filter(c => c.website && !c.enrichment_source);
+
+  if (!toEnrich.length) {
+    alert('No companies to enrich. Make sure they have websites and haven\'t been enriched yet.');
+    return;
+  }
+
+  if (!confirm(`AI Enrich ${toEnrich.length} companies?\n\nThis uses Claude AI to:\n• Extract IČO & company segment\n• Scrape team pages for contacts (FREE)\n• Fallback to Hunter.io if needed\n• Validate emails via MX check`)) {
+    return;
+  }
+
+  const btn = document.getElementById('waterfall-enrich-btn');
+  const originalText = btn.innerHTML;
+  btn.disabled = true;
+
+  let enriched = 0;
+  let totalContacts = 0;
+  const errors = [];
+
+  for (let i = 0; i < toEnrich.length; i++) {
+    const company = toEnrich[i];
+    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="waterfall-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" /></svg> ${i + 1}/${toEnrich.length}...`;
+
+    try {
+      const res = await fetch(`/api/companies/${company.id}/enrich-full`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        enriched++;
+        // Update local data
+        company.enrichment_source = 'waterfall_full';
+        company.segment = data.enrichment?.segment;
+        company.industry = data.enrichment?.industry;
+        company.ico = data.enrichment?.ico;
+        if (data.contacts?.length > 0) {
+          totalContacts += data.contacts.length;
+          company.contacts_count = data.contacts.length;
+          const primary = data.contacts.find(c => c.email);
+          if (primary) company.primary_email = primary.email;
+        }
+      } else {
+        const err = await res.json();
+        errors.push(`${company.name}: ${err.error}`);
+      }
+    } catch (err) {
+      errors.push(`${company.name}: ${err.message}`);
+    }
+
+    // Delay between requests
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = originalText;
+
+  let msg = `Done! Enriched ${enriched}/${toEnrich.length} companies.\nFound ${totalContacts} contacts.`;
+  if (errors.length > 0) {
+    msg += `\n\n${errors.length} errors:\n${errors.slice(0, 5).join('\n')}`;
+    if (errors.length > 5) msg += `\n...and ${errors.length - 5} more`;
+  }
+  alert(msg);
+  await loadCompanies(currentSearchId);
+}
+
+async function handleSingleEnrich(id, btn) {
+  const company = companies.find(c => c.id === id);
+  if (!company) return;
+
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:16px;height:16px;animation:spin 1s linear infinite;"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none" opacity="0.25"></circle><path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>';
+
+  try {
+    const res = await fetch(`/api/companies/${id}/enrich-full`, { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      company.enrichment_source = 'waterfall_full';
+      company.segment = data.enrichment?.segment;
+      company.industry = data.enrichment?.industry;
+      company.ico = data.enrichment?.ico;
+      if (data.contacts?.length > 0) {
+        company.contacts_count = data.contacts.length;
+        const primary = data.contacts.find(c => c.email);
+        if (primary) company.primary_email = primary.email;
+      }
+      renderCompanies();
+    } else {
+      const err = await res.json();
+      alert(`Error: ${err.error}`);
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    }
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+}
+
+async function showDetails(id) {
   const company = companies.find(c => c.id === id);
   if (!company) return;
 
@@ -455,6 +627,25 @@ function showDetails(id) {
     if (company.opening_hours) openingHours = JSON.parse(company.opening_hours);
     if (company.types) types = JSON.parse(company.types);
   } catch (e) {}
+
+  // Fetch contacts if enriched
+  let contactsHtml = '-';
+  if (company.contacts_count > 0) {
+    try {
+      const res = await fetch(`/api/companies/${id}/contacts`);
+      const contacts = await res.json();
+      if (contacts.length) {
+        contactsHtml = contacts.map(c => `
+          <div class="contact-card ${c.is_primary ? 'primary' : ''}">
+            <div class="contact-name">${escapeHtml(c.full_name || c.email)}</div>
+            <div class="contact-email"><a href="mailto:${escapeHtml(c.email)}">${escapeHtml(c.email)}</a></div>
+            ${c.title ? `<div class="contact-title">${escapeHtml(c.title)}</div>` : ''}
+            <div class="contact-confidence">${c.confidence}% confidence</div>
+          </div>
+        `).join('');
+      }
+    } catch (e) {}
+  }
 
   content.innerHTML = `
     <div class="field">
@@ -469,6 +660,35 @@ function showDetails(id) {
       <div class="field-label">Category</div>
       <div class="field-value">${escapeHtml(formatCategory(company.category))}</div>
     </div>
+    ${company.segment ? `
+    <div class="field">
+      <div class="field-label">Segment</div>
+      <div class="field-value">${formatSegmentBadge(company.segment, company.enrichment_source)}</div>
+    </div>
+    ` : ''}
+    ${company.industry ? `
+    <div class="field">
+      <div class="field-label">Industry</div>
+      <div class="field-value">${escapeHtml(company.industry)}</div>
+    </div>
+    ` : ''}
+    ${company.ico ? `
+    <div class="field">
+      <div class="field-label">IČO (Czech ID)</div>
+      <div class="field-value">
+        <span class="ico-badge ${company.ico_validated ? 'validated' : ''}">
+          ${escapeHtml(company.ico)}
+          ${company.ico_validated ? '<svg class="check-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>' : ''}
+        </span>
+      </div>
+    </div>
+    ` : ''}
+    ${company.company_size ? `
+    <div class="field">
+      <div class="field-label">Company Size</div>
+      <div class="field-value">${escapeHtml(company.company_size)}</div>
+    </div>
+    ` : ''}
     <div class="field">
       <div class="field-label">Website</div>
       <div class="field-value">${company.website ? `<a href="${escapeHtml(company.website)}" target="_blank">${escapeHtml(company.website)}</a>` : '-'}</div>
@@ -481,13 +701,19 @@ function showDetails(id) {
       <div class="field-label">Rating</div>
       <div class="field-value">${company.rating ? `${company.rating} (${company.rating_count} reviews)` : '-'}</div>
     </div>
+    <div class="field contacts-section">
+      <div class="field-label">Contacts</div>
+      <div class="field-value">${contactsHtml}</div>
+    </div>
+    ${company.enrichment_source ? `
+    <div class="field">
+      <div class="field-label">Enrichment Source</div>
+      <div class="field-value"><span class="enrichment-badge ${company.enrichment_source.includes('web') ? 'web_scrape' : 'hunter'}">${escapeHtml(company.enrichment_source)}</span></div>
+    </div>
+    ` : ''}
     <div class="field">
       <div class="field-label">Business Status</div>
       <div class="field-value">${escapeHtml(company.business_status || '-')}</div>
-    </div>
-    <div class="field">
-      <div class="field-label">Price Level</div>
-      <div class="field-value">${company.price_level ? '$'.repeat(company.price_level) : '-'}</div>
     </div>
     <div class="field">
       <div class="field-label">Types</div>
@@ -496,10 +722,6 @@ function showDetails(id) {
     <div class="field">
       <div class="field-label">Opening Hours</div>
       <div class="field-value">${openingHours?.weekdayDescriptions ? openingHours.weekdayDescriptions.join('<br>') : '-'}</div>
-    </div>
-    <div class="field">
-      <div class="field-label">Coordinates</div>
-      <div class="field-value">${company.lat && company.lng ? `${company.lat}, ${company.lng}` : '-'}</div>
     </div>
     <div class="field">
       <div class="field-label">Google Place ID</div>
@@ -588,4 +810,12 @@ function debounce(fn, delay) {
     clearTimeout(timeout);
     timeout = setTimeout(() => fn(...args), delay);
   };
+}
+
+function formatSegmentBadge(segment, enrichmentSource) {
+  if (!segment && !enrichmentSource) return '-';
+  if (!segment) return `<span class="enrichment-badge pending">Pending</span>`;
+
+  const segmentClass = segment.toLowerCase().replace(/[^a-z]/g, '-');
+  return `<span class="segment-badge ${segmentClass}">${escapeHtml(segment)}</span>`;
 }

@@ -52,21 +52,33 @@
           <span id="search-meta" class="meta"></span>
         </div>
         <div class="results-actions">
-          <button id="export-btn" class="btn btn-secondary">Export CSV</button>
-          <button id="enrich-btn" class="btn btn-hunter" disabled>
-            <span class="hunter-logo">H</span>
-            Enrich with Hunter
-            <span class="badge-soon">Soon</span>
+          <label class="filter-checkbox">
+            <input type="checkbox" id="website-filter">
+            <span>Website</span>
+          </label>
+          <button id="export-btn" class="btn btn-secondary">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:16px;height:16px;margin-right:4px;">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+            </svg>
+            CSV
           </button>
+          <button id="waterfall-enrich-btn" class="btn btn-waterfall">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="waterfall-icon">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+            </svg>
+            AI Enrich
+          </button>
+          <button id="dedupe-btn" class="btn btn-notion" disabled>
+            <img src="notion-logo.png" alt="Notion" class="notion-logo">
+            De-duplicate
+            <span class="coming-soon-chip">COMING SOON</span>
+          </button>
+          <button id="delete-selected-btn" class="btn btn-danger btn-small hidden">Delete Selected</button>
         </div>
       </div>
 
       <div class="filters-bar">
         <input type="text" id="search-filter" placeholder="Search by name, city, category..." class="search-input">
-        <select id="category-filter" class="filter-select">
-          <option value="">All Categories</option>
-        </select>
-        <button id="delete-selected-btn" class="btn btn-danger btn-small hidden">Delete Selected</button>
       </div>
 
       <div id="results-table-container">
@@ -77,10 +89,10 @@
               <th class="sortable" data-sort="name">Name</th>
               <th class="sortable" data-sort="address">City</th>
               <th class="sortable" data-sort="category">Category</th>
+              <th class="sortable" data-sort="segment">Segment</th>
               <th class="sortable" data-sort="website">Website</th>
               <th class="sortable" data-sort="rating">Rating</th>
-              <th class="sortable" data-sort="rating_count">Reviews</th>
-              <th class="sortable" data-sort="created_at">Added</th>
+              <th class="sortable" data-sort="primary_email">Email</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -134,6 +146,107 @@
       </div>
     </div>
 
+    <!-- AI Enrich Panel -->
+    <div id="enrich-panel" class="enrich-panel hidden">
+      <div class="enrich-panel-header">
+        <div class="enrich-panel-title">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="enrich-panel-icon">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
+          </svg>
+          <span>AI Enrichment</span>
+        </div>
+        <button id="close-enrich-panel" class="enrich-close-btn">&times;</button>
+      </div>
+
+      <div class="enrich-panel-summary">
+        <div class="enrich-overall-progress">
+          <span id="enrich-progress-text">0 of 0 companies</span>
+          <div class="enrich-progress-bar">
+            <div id="enrich-progress-fill" class="enrich-progress-fill"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="enrich-panel-current">
+        <div class="enrich-current-company">
+          <span class="enrich-current-label">Currently processing:</span>
+          <span id="enrich-current-name" class="enrich-current-name">-</span>
+        </div>
+
+        <div class="enrich-steps">
+          <div class="enrich-step" data-step="scrape">
+            <div class="enrich-step-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 0 1 3 12c0-1.605.42-3.113 1.157-4.418" />
+              </svg>
+            </div>
+            <div class="enrich-step-content">
+              <span class="enrich-step-name">Scrape website</span>
+              <span class="enrich-step-status"></span>
+            </div>
+            <div class="enrich-step-indicator"></div>
+          </div>
+
+          <div class="enrich-step" data-step="analyze">
+            <div class="enrich-step-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
+              </svg>
+            </div>
+            <div class="enrich-step-content">
+              <span class="enrich-step-name">AI analysis</span>
+              <span class="enrich-step-status"></span>
+            </div>
+            <div class="enrich-step-indicator"></div>
+          </div>
+
+          <div class="enrich-step" data-step="contacts">
+            <div class="enrich-step-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
+              </svg>
+            </div>
+            <div class="enrich-step-content">
+              <span class="enrich-step-name">Find contacts</span>
+              <span class="enrich-step-status"></span>
+            </div>
+            <div class="enrich-step-indicator"></div>
+          </div>
+
+          <div class="enrich-step" data-step="validate">
+            <div class="enrich-step-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+              </svg>
+            </div>
+            <div class="enrich-step-content">
+              <span class="enrich-step-name">Validate emails</span>
+              <span class="enrich-step-status"></span>
+            </div>
+            <div class="enrich-step-indicator"></div>
+          </div>
+
+          <div class="enrich-step" data-step="hunter">
+            <div class="enrich-step-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" />
+              </svg>
+            </div>
+            <div class="enrich-step-content">
+              <span class="enrich-step-name">Hunter fallback</span>
+              <span class="enrich-step-status"></span>
+            </div>
+            <div class="enrich-step-indicator"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="enrich-results" class="enrich-results">
+        <div class="enrich-results-header">Results</div>
+        <div id="enrich-results-list" class="enrich-results-list"></div>
+      </div>
+    </div>
+
     <!-- Full View Panel -->
     <div id="full-view-panel" class="side-panel hidden">
       <div class="panel-header">
@@ -143,6 +256,9 @@
       <div id="panel-content" class="panel-content"></div>
     </div>
   </div>
+
+  <!-- Enrich backdrop -->
+  <div id="enrich-backdrop" class="enrich-backdrop hidden"></div>
 
   <script src="app.js"></script>
 </body>
