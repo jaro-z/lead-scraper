@@ -1,4 +1,5 @@
 const db = require('./db');
+const { sleep } = require('./utils');
 
 const API_BASE = 'https://places.googleapis.com/v1/places:searchText';
 const GEOCODE_BASE = 'https://maps.googleapis.com/maps/api/geocode/json';
@@ -183,9 +184,8 @@ async function searchPlaces(query, bounds, apiKey, existingPlaceIds, onProgress)
       onProgress({ page: pageNum, resultsCount: results.length });
     }
 
-    // Small delay between pages to be nice to the API
     if (pageToken) {
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await sleep(200);
     }
 
   } while (pageToken && pageNum < 3); // Max 3 pages per search
@@ -265,8 +265,7 @@ async function runSearch(searchId, query, location, gridSize, apiKey, limit, onP
       // Continue with other cells
     }
 
-    // Small delay between cells
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await sleep(100);
   }
 
   // Update search with final count

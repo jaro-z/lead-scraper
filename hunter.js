@@ -2,6 +2,8 @@
  * Hunter.io API client for email enrichment
  */
 
+const { extractDomain } = require('./utils');
+
 const HUNTER_API_BASE = 'https://api.hunter.io/v2';
 
 // Priority order for decision-maker titles
@@ -14,19 +16,6 @@ const TITLE_PRIORITY = [
   'principal',
   'director'
 ];
-
-/**
- * Extract domain from website URL
- */
-function extractDomain(website) {
-  if (!website) return null;
-  try {
-    const url = new URL(website.startsWith('http') ? website : `https://${website}`);
-    return url.hostname.replace(/^www\./, '');
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Get title priority score (lower = better)

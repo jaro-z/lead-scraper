@@ -82,6 +82,15 @@ function formatAddress(sidlo) {
   return parts.join(', ') || null;
 }
 
+// Common patterns for extracting Czech IČO from text/HTML
+const ICO_PATTERNS = [
+  /IČO[\s:]*(\d{8})/i,
+  /IČ[\s:]*(\d{8})/i,
+  /I\.?Č\.?[\s:]*(\d{8})/i,
+  /(?:Company\s*)?(?:ID|Registration|Reg\.?\s*No\.?)[\s:]*(\d{8})/i,
+  /Identifikační\s*číslo[\s:]*(\d{8})/i
+];
+
 /**
  * Extract IČO from text (useful for parsing company websites)
  * @param {string} text - Text to search for IČO
@@ -90,14 +99,7 @@ function formatAddress(sidlo) {
 function extractICO(text) {
   if (!text) return null;
 
-  // Common patterns: "IČO: 12345678", "IČ: 12345678", "IČO 12345678"
-  const patterns = [
-    /IČO[\s:]*(\d{8})/i,
-    /IČ[\s:]*(\d{8})/i,
-    /(?:registration|reg\.?\s*(?:no\.?|number))[\s:]*(\d{8})/i
-  ];
-
-  for (const pattern of patterns) {
+  for (const pattern of ICO_PATTERNS) {
     const match = text.match(pattern);
     if (match) {
       return match[1];

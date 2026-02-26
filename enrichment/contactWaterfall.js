@@ -13,6 +13,12 @@
 const webScraper = require('./webScraper');
 const hunter = require('../hunter');
 
+// Default confidence scores by source
+const DEFAULT_CONFIDENCE = {
+  web_scrape: 50,
+  hunter: 0
+};
+
 /**
  * Discover contacts for a company using waterfall approach
  * @param {number|string} companyId - Company ID in database
@@ -76,65 +82,71 @@ async function discoverContacts(companyId, domain, hunterApiKey) {
 }
 
 /**
+ * Split full name into first and last name
+ * @param {string} fullName - Full name string
+ * @returns {{firstName: string|null, lastName: string|null}}
+ */
+function splitName(fullName) {
+  if (!fullName) return { firstName: null, lastName: null };
+  const parts = fullName.trim().split(/\s+/);
+  return {
+    firstName: parts[0] || null,
+    lastName: parts.length > 1 ? parts.slice(1).join(' ') : null
+  };
+}
+
+/**
+ * Normalize a web scraper contact to common format
+ * @param {Object} contact - Raw contact from web scraper
+ * @returns {Object} Normalized contact
+ */
+function normalizeWebScraperContact(contact) {
+  const { firstName, lastName } = splitName(contact.name);
+  return {
+    name: contact.name || null,
+    firstName: contact.firstName || firstName,
+    lastName: contact.lastName || lastName,
+    email: contact.email || null,
+    phone: contact.phone || null,
+    title: contact.role || contact.title || null,
+    source: 'web_scrape',
+    confidence: contact.confidence || DEFAULT_CONFIDENCE.web_scrape
+  };
+}
+
+/**
+ * Normalize a Hunter.io contact to common format
+ * @param {Object} contact - Raw contact from Hunter.io
+ * @returns {Object} Normalized contact
+ */
+function normalizeHunterContact(contact) {
+  const name = contact.fullName || [contact.firstName, contact.lastName].filter(Boolean).join(' ');
+  return {
+    name: name || null,
+    firstName: contact.firstName || null,
+    lastName: contact.lastName || null,
+    email: contact.email || null,
+    phone: null,
+    title: contact.title || contact.position || null,
+    source: 'hunter',
+    confidence: contact.confidence || DEFAULT_CONFIDENCE.hunter
+  };
+}
+
+/**
  * Normalize contacts from different sources to a common format
  * @param {Array} contacts - Raw contacts from source
  * @param {string} source - Source identifier ('web_scrape' | 'hunter')
  * @returns {Array} Normalized contacts
  */
 function normalizeContacts(contacts, source) {
-  return contacts.map(contact => {
-    // Handle web scraper format
-    if (source === 'web_scrape') {
-      return {
-        name: contact.name || null,
-        firstName: contact.firstName || extractFirstName(contact.name),
-        lastName: contact.lastName || extractLastName(contact.name),
-        email: contact.email || null,
-        phone: contact.phone || null,
-        title: contact.role || contact.title || null,
-        source: 'web_scrape',
-        confidence: contact.confidence || 50 // Default confidence for scraped data
-      };
-    }
-
-    // Handle Hunter.io format
-    if (source === 'hunter') {
-      return {
-        name: contact.fullName || [contact.firstName, contact.lastName].filter(Boolean).join(' '),
-        firstName: contact.firstName || null,
-        lastName: contact.lastName || null,
-        email: contact.email || null,
-        phone: null, // Hunter doesn't provide phone
-        title: contact.title || contact.position || null,
-        source: 'hunter',
-        confidence: contact.confidence || 0
-      };
-    }
-
-    return contact;
-  });
-}
-
-/**
- * Extract first name from full name
- * @param {string} fullName - Full name string
- * @returns {string|null}
- */
-function extractFirstName(fullName) {
-  if (!fullName) return null;
-  const parts = fullName.trim().split(/\s+/);
-  return parts[0] || null;
-}
-
-/**
- * Extract last name from full name
- * @param {string} fullName - Full name string
- * @returns {string|null}
- */
-function extractLastName(fullName) {
-  if (!fullName) return null;
-  const parts = fullName.trim().split(/\s+/);
-  return parts.length > 1 ? parts.slice(1).join(' ') : null;
+  if (source === 'web_scrape') {
+    return contacts.map(normalizeWebScraperContact);
+  }
+  if (source === 'hunter') {
+    return contacts.map(normalizeHunterContact);
+  }
+  return contacts;
 }
 
 /**

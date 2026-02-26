@@ -30,8 +30,6 @@ module.exports = {
   contactWaterfall,
   templateRouter,
 
-  // Re-export commonly used functions for convenience
-
   // Validators
   validateEmail: validators.validateEmail,
   validatePhone: validators.validatePhone,
@@ -45,6 +43,7 @@ module.exports = {
   // Web Scraper
   scrapeTeamPages: webScraper.scrapeTeamPages,
   fetchPage: webScraper.fetchPage,
+  cleanHtml: webScraper.cleanHtml,
   extractContactsWithClaude: webScraper.extractContactsWithClaude,
 
   // Company Enricher

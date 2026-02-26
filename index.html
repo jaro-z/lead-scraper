@@ -51,34 +51,63 @@
           <h2 id="search-title">Results</h2>
           <span id="search-meta" class="meta"></span>
         </div>
-        <div class="results-actions">
-          <label class="filter-checkbox">
-            <input type="checkbox" id="website-filter">
-            <span>Website</span>
-          </label>
-          <button id="export-btn" class="btn btn-secondary">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:16px;height:16px;margin-right:4px;">
+      </div>
+
+      <!-- Pipeline Progress Bar -->
+      <div class="pipeline-progress" id="pipeline-progress">
+        <div class="progress-track">
+          <div class="progress-segment raw" data-stage="raw">
+            <span class="segment-fill"></span>
+          </div>
+          <div class="progress-segment qualified" data-stage="qualified">
+            <span class="segment-fill"></span>
+          </div>
+          <div class="progress-segment enriched" data-stage="enriched">
+            <span class="segment-fill"></span>
+          </div>
+          <div class="progress-segment ready" data-stage="ready">
+            <span class="segment-fill"></span>
+          </div>
+        </div>
+        <div class="progress-labels">
+          <span class="progress-label" data-stage="raw"><strong id="stat-raw">0</strong> Raw</span>
+          <span class="progress-label" data-stage="qualified"><strong id="stat-qualified">0</strong> Qualified</span>
+          <span class="progress-label" data-stage="enriched"><strong id="stat-enriched">0</strong> Enriched</span>
+          <span class="progress-label" data-stage="ready"><strong id="stat-ready">0</strong> Ready</span>
+        </div>
+      </div>
+
+      <!-- Action Bar -->
+      <div class="action-bar">
+        <button id="main-action-btn" class="btn btn-main-action">
+          <span id="main-action-text">Process Leads</span>
+        </button>
+        <div class="action-bar-right">
+          <button id="export-btn" class="btn btn-secondary btn-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
             </svg>
             CSV
           </button>
-          <button id="waterfall-enrich-btn" class="btn btn-waterfall">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="waterfall-icon">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
-            </svg>
-            AI Enrich
-          </button>
-          <button id="dedupe-btn" class="btn btn-notion" disabled>
+          <button id="dedupe-btn" class="btn btn-notion btn-icon">
             <img src="notion-logo.png" alt="Notion" class="notion-logo">
-            De-duplicate
-            <span class="coming-soon-chip">COMING SOON</span>
+            Push to Notion
           </button>
-          <button id="delete-selected-btn" class="btn btn-danger btn-small hidden">Delete Selected</button>
+          <button id="delete-selected-btn" class="btn btn-danger hidden">Delete</button>
         </div>
       </div>
 
       <div class="filters-bar">
-        <input type="text" id="search-filter" placeholder="Search by name, city, category..." class="search-input">
+        <input type="text" id="search-filter" placeholder="Search by name, city..." class="search-input">
+        <select id="segment-filter" class="filter-select">
+          <option value="">All Segments</option>
+          <option value="saas">SaaS</option>
+          <option value="agency">Agency</option>
+          <option value="e-commerce">E-commerce</option>
+          <option value="manufacturing">Manufacturing</option>
+          <option value="services">Services</option>
+          <option value="other">Other</option>
+        </select>
       </div>
 
       <div id="results-table-container">
@@ -88,11 +117,8 @@
               <th class="checkbox-col"><input type="checkbox" id="select-all"></th>
               <th class="sortable" data-sort="name">Name</th>
               <th class="sortable" data-sort="address">City</th>
-              <th class="sortable" data-sort="category">Category</th>
-              <th class="sortable" data-sort="segment">Segment</th>
               <th class="sortable" data-sort="website">Website</th>
-              <th class="sortable" data-sort="rating">Rating</th>
-              <th class="sortable" data-sort="primary_email">Email</th>
+              <th class="sortable" data-sort="segment">Segment</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -103,6 +129,10 @@
 
       <div id="results-count" class="results-count"></div>
     </div>
+
+    <!-- Hidden elements for backwards compatibility -->
+    <input type="checkbox" id="website-filter" class="hidden">
+    <select id="stage-filter" class="hidden"><option value=""></option></select>
 
     <!-- New Search Modal -->
     <div id="search-modal" class="modal hidden">
@@ -246,6 +276,63 @@
         <div id="enrich-results-list" class="enrich-results-list"></div>
       </div>
     </div>
+
+    <!-- Dedupe Panel (Notion) -->
+    <div id="dedupe-panel" class="dedupe-panel hidden">
+      <div class="dedupe-panel-header">
+        <div class="dedupe-panel-title">
+          <img src="notion-logo.png" alt="Notion" class="notion-logo-small">
+          <span>De-duplicate vs Notion CRM</span>
+        </div>
+        <button id="close-dedupe-panel" class="dedupe-close-btn">&times;</button>
+      </div>
+
+      <div id="dedupe-not-configured" class="dedupe-not-configured hidden">
+        <div class="config-warning">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+          </svg>
+          <p>Notion not configured. Add these to your <code>.env.local</code>:</p>
+          <pre>NOTION_API_KEY=secret_xxx
+NOTION_DATABASE_ID=your_database_id</pre>
+        </div>
+      </div>
+
+      <div id="dedupe-loading" class="dedupe-loading hidden">
+        <div class="spinner"></div>
+        <p>Fetching contacts from Notion CRM...</p>
+      </div>
+
+      <div id="dedupe-results" class="hidden">
+        <div class="dedupe-summary">
+          <div class="dedupe-stat unique">
+            <span class="dedupe-stat-value" id="dedupe-unique-count">0</span>
+            <span class="dedupe-stat-label">Unique</span>
+          </div>
+          <div class="dedupe-stat dupes">
+            <span class="dedupe-stat-value" id="dedupe-dupe-count">0</span>
+            <span class="dedupe-stat-label">Duplicates</span>
+          </div>
+          <div class="dedupe-stat total">
+            <span class="dedupe-stat-value" id="dedupe-total-count">0</span>
+            <span class="dedupe-stat-label">Total checked</span>
+          </div>
+        </div>
+
+        <div class="dedupe-actions">
+          <button id="dedupe-delete-dupes" class="btn btn-danger btn-small">Delete Duplicates</button>
+          <button id="dedupe-export-unique" class="btn btn-primary btn-small">Export Unique to Notion</button>
+        </div>
+
+        <div class="dedupe-list-header">
+          <span>Review duplicates (click to expand)</span>
+        </div>
+        <div id="dedupe-list" class="dedupe-list"></div>
+      </div>
+    </div>
+
+    <!-- Dedupe backdrop -->
+    <div id="dedupe-backdrop" class="dedupe-backdrop hidden"></div>
 
     <!-- Full View Panel -->
     <div id="full-view-panel" class="side-panel hidden">

@@ -1,5 +1,6 @@
 const Database = require('better-sqlite3');
 const path = require('path');
+const { buildUpdateQuery, validateIds, escapeCSV } = require('./utils');
 
 const dbPath = path.join(__dirname, 'data', 'leads.db');
 const db = new Database(dbPath);
@@ -82,50 +83,36 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
 `);
 
-// Add enrichment columns if missing (safe migration)
-try {
-  db.exec(`ALTER TABLE companies ADD COLUMN enriched_at DATETIME`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE companies ADD COLUMN contacts_count INTEGER DEFAULT 0`);
-} catch (e) { /* column exists */ }
+// Safe column migrations (ignores if column already exists)
+function addColumnIfMissing(table, column, definition) {
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  } catch (e) {
+    // Column already exists - ignore
+  }
+}
 
-// PRD-WATERFALL-ENRICHMENT: Add company enrichment columns
-try {
-  db.exec(`ALTER TABLE companies ADD COLUMN ico TEXT`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE companies ADD COLUMN ico_validated INTEGER DEFAULT 0`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE companies ADD COLUMN segment TEXT`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE companies ADD COLUMN industry TEXT`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE companies ADD COLUMN company_size TEXT`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE companies ADD COLUMN enrichment_source TEXT`);
-} catch (e) { /* column exists */ }
+// Company enrichment columns
+addColumnIfMissing('companies', 'enriched_at', 'DATETIME');
+addColumnIfMissing('companies', 'contacts_count', 'INTEGER DEFAULT 0');
+addColumnIfMissing('companies', 'ico', 'TEXT');
+addColumnIfMissing('companies', 'ico_validated', 'INTEGER DEFAULT 0');
+addColumnIfMissing('companies', 'segment', 'TEXT');
+addColumnIfMissing('companies', 'industry', 'TEXT');
+addColumnIfMissing('companies', 'company_size', 'TEXT');
+addColumnIfMissing('companies', 'enrichment_source', 'TEXT');
 
-// PRD-WATERFALL-ENRICHMENT: Add contact enrichment columns
-try {
-  db.exec(`ALTER TABLE contacts ADD COLUMN phone TEXT`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE contacts ADD COLUMN email_valid INTEGER`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE contacts ADD COLUMN email_validated_at TEXT`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE contacts ADD COLUMN template_type TEXT`);
-} catch (e) { /* column exists */ }
-try {
-  db.exec(`ALTER TABLE contacts ADD COLUMN source TEXT`);
-} catch (e) { /* column exists */ }
+// Pipeline stage columns
+addColumnIfMissing('companies', 'pipeline_stage', "TEXT DEFAULT 'raw'");
+addColumnIfMissing('companies', 'in_notion', 'INTEGER DEFAULT 0');
+addColumnIfMissing('companies', 'qualified_at', 'DATETIME');
+
+// Contact enrichment columns
+addColumnIfMissing('contacts', 'phone', 'TEXT');
+addColumnIfMissing('contacts', 'email_valid', 'INTEGER');
+addColumnIfMissing('contacts', 'email_validated_at', 'TEXT');
+addColumnIfMissing('contacts', 'template_type', 'TEXT');
+addColumnIfMissing('contacts', 'source', 'TEXT');
 
 // ============ Searches ============
 
@@ -244,22 +231,9 @@ function deleteCompany(id) {
 }
 
 function bulkDeleteCompanies(ids) {
-  // Input validation: ensure all IDs are positive integers
-  if (!Array.isArray(ids) || ids.length === 0) {
-    throw new Error('Invalid IDs: must be a non-empty array');
-  }
-  if (ids.length > 1000) {
-    throw new Error('Invalid IDs: maximum 1000 items per batch');
-  }
-  const validatedIds = ids.map(id => {
-    const num = Number(id);
-    if (!Number.isInteger(num) || num <= 0) {
-      throw new Error(`Invalid ID: ${id} must be a positive integer`);
-    }
-    return num;
-  });
-
+  const validatedIds = validateIds(ids);
   const placeholders = validatedIds.map(() => '?').join(',');
+
   db.prepare(`DELETE FROM search_companies WHERE company_id IN (${placeholders})`).run(...validatedIds);
   db.prepare(`DELETE FROM contacts WHERE company_id IN (${placeholders})`).run(...validatedIds);
   db.prepare(`DELETE FROM companies WHERE id IN (${placeholders})`).run(...validatedIds);
@@ -305,30 +279,11 @@ function canMakeApiCall(limit) {
 function exportToCSV(companies) {
   const headers = ['Name', 'Address', 'Category', 'Website', 'Rating', 'Reviews', 'Phone', 'Added'];
   const rows = companies.map(c => [
-    c.name || '',
-    c.address || '',
-    c.category || '',
-    c.website || '',
-    c.rating || '',
-    c.rating_count || '',
-    c.phone || '',
-    c.created_at || ''
-  ]);
+    c.name, c.address, c.category, c.website,
+    c.rating, c.rating_count, c.phone, c.created_at
+  ].map(escapeCSV));
 
-  const escape = (val) => {
-    const str = String(val);
-    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
-
-  const csvContent = [
-    headers.join(','),
-    ...rows.map(row => row.map(escape).join(','))
-  ].join('\n');
-
-  return csvContent;
+  return [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
 }
 
 // ============ Contacts (Hunter Enrichment) ============
@@ -383,40 +338,12 @@ function getCompaniesForEnrichment() {
  * @param {Object} data - Enrichment data
  */
 function updateCompanyEnrichment(id, data) {
-  const fields = [];
-  const values = [];
+  const query = buildUpdateQuery('companies', data);
+  if (!query) return;
 
-  if (data.ico !== undefined) {
-    fields.push('ico = ?');
-    values.push(data.ico);
-  }
-  if (data.segment !== undefined) {
-    fields.push('segment = ?');
-    values.push(data.segment);
-  }
-  if (data.industry !== undefined) {
-    fields.push('industry = ?');
-    values.push(data.industry);
-  }
-  if (data.company_size !== undefined) {
-    fields.push('company_size = ?');
-    values.push(data.company_size);
-  }
-  if (data.enrichment_source !== undefined) {
-    fields.push('enrichment_source = ?');
-    values.push(data.enrichment_source);
-  }
-  if (data.ico_validated !== undefined) {
-    fields.push('ico_validated = ?');
-    values.push(data.ico_validated ? 1 : 0);
-  }
-
-  if (fields.length === 0) return;
-
-  fields.push('updated_at = CURRENT_TIMESTAMP');
-  values.push(id);
-
-  db.prepare(`UPDATE companies SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  // Append updated_at timestamp
+  const sql = query.sql.replace(' WHERE', ', updated_at = CURRENT_TIMESTAMP WHERE');
+  db.prepare(sql).run(...query.values, id);
 }
 
 /**
@@ -425,35 +352,10 @@ function updateCompanyEnrichment(id, data) {
  * @param {Object} data - Validation data
  */
 function updateContactValidation(contactId, data) {
-  const fields = [];
-  const values = [];
+  const query = buildUpdateQuery('contacts', data);
+  if (!query) return;
 
-  if (data.email_valid !== undefined) {
-    fields.push('email_valid = ?');
-    values.push(data.email_valid ? 1 : 0);
-  }
-  if (data.email_validated_at !== undefined) {
-    fields.push('email_validated_at = ?');
-    values.push(data.email_validated_at);
-  }
-  if (data.template_type !== undefined) {
-    fields.push('template_type = ?');
-    values.push(data.template_type);
-  }
-  if (data.source !== undefined) {
-    fields.push('source = ?');
-    values.push(data.source);
-  }
-  if (data.phone !== undefined) {
-    fields.push('phone = ?');
-    values.push(data.phone);
-  }
-
-  if (fields.length === 0) return;
-
-  values.push(contactId);
-
-  db.prepare(`UPDATE contacts SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  db.prepare(query.sql).run(...query.values, contactId);
 }
 
 /**
@@ -492,6 +394,114 @@ function getContactById(id) {
   return db.prepare(`SELECT * FROM contacts WHERE id = ?`).get(id);
 }
 
+// ============ Pipeline Stage Functions ============
+
+/**
+ * Get companies by pipeline stage
+ * @param {string} stage - Pipeline stage (raw, qualified, classified, enriched, ready)
+ * @returns {Array} Companies in that stage
+ */
+function getCompaniesByStage(stage) {
+  return db.prepare(`
+    SELECT c.*,
+      (SELECT email FROM contacts WHERE company_id = c.id AND is_primary = 1 LIMIT 1) as primary_email
+    FROM companies c
+    WHERE c.pipeline_stage = ?
+    ORDER BY c.name ASC
+  `).all(stage);
+}
+
+/**
+ * Get pipeline statistics (count of companies per stage)
+ * @returns {Object} Counts by stage
+ */
+function getPipelineStats() {
+  const stats = db.prepare(`
+    SELECT
+      SUM(CASE WHEN pipeline_stage = 'raw' OR pipeline_stage IS NULL THEN 1 ELSE 0 END) as raw,
+      SUM(CASE WHEN pipeline_stage = 'qualified' THEN 1 ELSE 0 END) as qualified,
+      SUM(CASE WHEN pipeline_stage = 'classified' THEN 1 ELSE 0 END) as classified,
+      SUM(CASE WHEN pipeline_stage = 'enriched' THEN 1 ELSE 0 END) as enriched,
+      SUM(CASE WHEN pipeline_stage = 'ready' THEN 1 ELSE 0 END) as ready,
+      SUM(CASE WHEN in_notion = 1 THEN 1 ELSE 0 END) as in_notion,
+      COUNT(*) as total
+    FROM companies
+  `).get();
+
+  return {
+    raw: stats.raw || 0,
+    qualified: stats.qualified || 0,
+    classified: stats.classified || 0,
+    enriched: stats.enriched || 0,
+    ready: stats.ready || 0,
+    in_notion: stats.in_notion || 0,
+    total: stats.total || 0
+  };
+}
+
+/**
+ * Update pipeline stage for a company
+ * @param {number} id - Company ID
+ * @param {string} stage - New pipeline stage
+ */
+function updatePipelineStage(id, stage) {
+  const validStages = ['raw', 'qualified', 'classified', 'enriched', 'ready'];
+  if (!validStages.includes(stage)) {
+    throw new Error(`Invalid pipeline stage: ${stage}`);
+  }
+
+  const updates = { pipeline_stage: stage, updated_at: 'CURRENT_TIMESTAMP' };
+  if (stage === 'qualified') {
+    db.prepare(`
+      UPDATE companies SET pipeline_stage = ?, qualified_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(stage, id);
+  } else {
+    db.prepare(`
+      UPDATE companies SET pipeline_stage = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(stage, id);
+  }
+}
+
+/**
+ * Mark company as found in Notion (duplicate)
+ * @param {number} id - Company ID
+ */
+function markInNotion(id) {
+  db.prepare(`
+    UPDATE companies SET in_notion = 1, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+}
+
+/**
+ * Get companies that need qualification (raw stage with website)
+ * @returns {Array} Companies to qualify
+ */
+function getCompaniesForQualification() {
+  return db.prepare(`
+    SELECT * FROM companies
+    WHERE (pipeline_stage = 'raw' OR pipeline_stage IS NULL)
+      AND website IS NOT NULL AND website != ''
+      AND in_notion = 0
+    ORDER BY created_at DESC
+  `).all();
+}
+
+/**
+ * Get companies for classification (qualified stage)
+ * @returns {Array} Companies to classify
+ */
+function getCompaniesForClassification() {
+  return db.prepare(`
+    SELECT * FROM companies
+    WHERE pipeline_stage = 'qualified'
+      AND (segment IS NULL OR segment = '')
+    ORDER BY created_at DESC
+  `).all();
+}
+
 module.exports = {
   db,
   createSearch,
@@ -518,5 +528,12 @@ module.exports = {
   updateContactValidation,
   getUnenrichedCompanies,
   getUnvalidatedContacts,
-  getContactById
+  getContactById,
+  // Pipeline stage functions
+  getCompaniesByStage,
+  getPipelineStats,
+  updatePipelineStage,
+  markInNotion,
+  getCompaniesForQualification,
+  getCompaniesForClassification
 };

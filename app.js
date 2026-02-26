@@ -6,6 +6,8 @@ let filteredCompanies = [];
 let selectedIds = new Set();
 let sortColumn = 'name';
 let sortDirection = 'asc';
+let activeStageFilter = '';
+let pipelineStats = { raw: 0, qualified: 0, classified: 0, enriched: 0, ready: 0, in_notion: 0, total: 0 };
 
 // DOM Elements
 const dashboardView = document.getElementById('dashboard-view');
@@ -37,8 +39,18 @@ function setupEventListeners() {
 
   // Filters
   document.getElementById('search-filter').addEventListener('input', debounce(applyFilters, 200));
-  document.getElementById('website-filter').addEventListener('change', applyFilters);
+  document.getElementById('segment-filter').addEventListener('change', applyFilters);
 
+  // Progress bar segment clicks
+  document.querySelectorAll('.progress-segment').forEach(seg => {
+    seg.addEventListener('click', () => handleProgressClick(seg.dataset.stage));
+  });
+  document.querySelectorAll('.progress-label').forEach(label => {
+    label.addEventListener('click', () => handleProgressClick(label.dataset.stage));
+  });
+
+  // Main action button
+  document.getElementById('main-action-btn').addEventListener('click', handleMainAction);
 
   // Select all
   document.getElementById('select-all').addEventListener('change', handleSelectAll);
@@ -48,12 +60,6 @@ function setupEventListeners() {
 
   // Export
   document.getElementById('export-btn').addEventListener('click', handleExport);
-
-  // Enrich with Hunter
-  document.getElementById('enrich-btn').addEventListener('click', handleEnrich);
-
-  // AI Waterfall Enrich
-  document.getElementById('waterfall-enrich-btn').addEventListener('click', handleWaterfallEnrich);
 
   // Close panel
   document.getElementById('close-panel').addEventListener('click', () => fullViewPanel.classList.add('hidden'));
@@ -105,6 +111,7 @@ async function loadCompanies(searchId) {
     companies = await res.json();
     filteredCompanies = [...companies];
     renderCompanies();
+    updateMainActionButton();
   } catch (error) {
     console.error('Error loading companies:', error);
   }
@@ -142,7 +149,7 @@ function renderCompanies() {
   const sorted = sortCompanies(filteredCompanies);
 
   if (!sorted.length) {
-    resultsBody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;">No results found</td></tr>';
+    resultsBody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;">No results found</td></tr>';
     document.getElementById('results-count').textContent = '';
     return;
   }
@@ -152,20 +159,10 @@ function renderCompanies() {
       <td><input type="checkbox" class="row-checkbox" ${selectedIds.has(c.id) ? 'checked' : ''}></td>
       <td>${escapeHtml(c.name || '-')}</td>
       <td>${escapeHtml(extractCity(c.address))}</td>
-      <td>${escapeHtml(formatCategory(c.category))}</td>
+      <td>${c.website ? `<a href="${escapeHtml(c.website)}" target="_blank">${escapeHtml(formatWebsiteUrl(c.website))}</a>` : '<span style="color:#9CA3AF">-</span>'}</td>
       <td>${formatSegmentBadge(c.segment, c.enrichment_source)}</td>
-      <td>${c.website ? `<a href="${escapeHtml(c.website)}" target="_blank">${escapeHtml(formatWebsiteUrl(c.website))}</a>` : '-'}</td>
-      <td>${c.rating ? `<span class="rating"><span class="star">★</span> ${c.rating}</span>` : '-'}</td>
-      <td>${c.primary_email ? `<a href="mailto:${escapeHtml(c.primary_email)}" class="email-link">${escapeHtml(c.primary_email)}</a>` : (c.contacts_count > 0 ? `<span class="contacts-badge">${c.contacts_count}</span>` : '-')}</td>
       <td>
         <div class="action-icons">
-          ${c.website && !c.enrichment_source ? `
-          <button class="icon-btn enrich-btn" title="AI Enrich">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
-            </svg>
-          </button>
-          ` : ''}
           <button class="icon-btn view-btn" title="View details">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
@@ -202,14 +199,6 @@ function renderCompanies() {
       e.stopPropagation();
       const id = parseInt(btn.closest('tr').dataset.id);
       showDetails(id);
-    });
-  });
-
-  resultsBody.querySelectorAll('.icon-btn.enrich-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const id = parseInt(btn.closest('tr').dataset.id);
-      handleSingleEnrich(id, btn);
     });
   });
 }
@@ -309,6 +298,7 @@ async function showResults(searchId) {
   resultsView.classList.remove('hidden');
 
   await loadCompanies(searchId);
+  await updatePipelineStats();
 }
 
 function showDashboard() {
@@ -366,20 +356,28 @@ function sortCompanies(list) {
 
 function applyFilters() {
   const searchTerm = document.getElementById('search-filter').value.toLowerCase();
-  const hasWebsite = document.getElementById('website-filter').checked;
+  const segmentFilter = document.getElementById('segment-filter').value;
 
   filteredCompanies = companies.filter(c => {
     const matchesSearch = !searchTerm ||
       (c.name && c.name.toLowerCase().includes(searchTerm)) ||
-      (c.address && c.address.toLowerCase().includes(searchTerm)) ||
-      (c.category && c.category.toLowerCase().includes(searchTerm));
+      (c.address && c.address.toLowerCase().includes(searchTerm));
 
-    const matchesWebsite = !hasWebsite || c.website;
+    // Stage filter from progress bar
+    let matchesStage = true;
+    if (activeStageFilter) {
+      matchesStage = (c.pipeline_stage || 'raw') === activeStageFilter;
+    }
 
-    return matchesSearch && matchesWebsite;
+    // Segment filter
+    const matchesSegment = !segmentFilter ||
+      (c.segment && c.segment.toLowerCase().includes(segmentFilter.toLowerCase()));
+
+    return matchesSearch && matchesStage && matchesSegment;
   });
 
   renderCompanies();
+  updateMainActionButton();
 }
 
 
@@ -409,7 +407,7 @@ function updateDeleteButton() {
   const btn = document.getElementById('delete-selected-btn');
   if (selectedIds.size > 0) {
     btn.classList.remove('hidden');
-    btn.textContent = `Delete Selected (${selectedIds.size})`;
+    btn.textContent = `Delete (${selectedIds.size})`;
   } else {
     btn.classList.add('hidden');
   }
@@ -512,20 +510,85 @@ async function handleEnrich() {
   renderCompanies();
 }
 
+// Enrich Panel Elements
+const enrichPanel = document.getElementById('enrich-panel');
+const enrichBackdrop = document.getElementById('enrich-backdrop');
+const enrichProgressText = document.getElementById('enrich-progress-text');
+const enrichProgressFill = document.getElementById('enrich-progress-fill');
+const enrichCurrentName = document.getElementById('enrich-current-name');
+const enrichResultsList = document.getElementById('enrich-results-list');
+
+let enrichmentRunning = false;
+
+function showEnrichPanel() {
+  enrichPanel.classList.remove('hidden');
+  enrichBackdrop.classList.remove('hidden');
+}
+
+function hideEnrichPanel() {
+  enrichPanel.classList.add('hidden');
+  enrichBackdrop.classList.add('hidden');
+}
+
+function resetEnrichSteps() {
+  document.querySelectorAll('.enrich-step').forEach(step => {
+    step.classList.remove('active', 'done', 'error', 'skipped');
+    step.querySelector('.enrich-step-status').textContent = '';
+  });
+}
+
+function setEnrichStep(stepName, state, status = '') {
+  const step = document.querySelector(`.enrich-step[data-step="${stepName}"]`);
+  if (!step) return;
+
+  step.classList.remove('active', 'done', 'error', 'skipped');
+  if (state) step.classList.add(state);
+  step.querySelector('.enrich-step-status').textContent = status;
+}
+
+function addEnrichResult(company, success, meta = '') {
+  const iconSvg = success
+    ? '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 0-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z" clip-rule="evenodd" /></svg>'
+    : '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-8-5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-1.5 0v-4.5A.75.75 0 0 1 10 5Zm0 10a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" clip-rule="evenodd" /></svg>';
+
+  const item = document.createElement('div');
+  item.className = 'enrich-result-item';
+  item.innerHTML = `
+    <div class="enrich-result-icon ${success ? 'success' : 'error'}">${iconSvg}</div>
+    <span class="enrich-result-name">${escapeHtml(company.name)}</span>
+    <span class="enrich-result-meta">${escapeHtml(meta)}</span>
+  `;
+  enrichResultsList.appendChild(item);
+  enrichResultsList.scrollTop = enrichResultsList.scrollHeight;
+}
+
 async function handleWaterfallEnrich() {
-  // Get companies to enrich (selected or all with websites but not enriched yet)
-  const toEnrich = selectedIds.size > 0
-    ? companies.filter(c => selectedIds.has(c.id) && c.website && !c.enrichment_source)
-    : companies.filter(c => c.website && !c.enrichment_source);
+  try {
+    if (!currentSearchId) {
+      alert('Please select a search first from the dashboard.');
+      return;
+    }
 
-  if (!toEnrich.length) {
-    alert('No companies to enrich. Make sure they have websites and haven\'t been enriched yet.');
-    return;
-  }
+    // Get companies to enrich (selected or qualified companies)
+    const toEnrich = selectedIds.size > 0
+      ? companies.filter(c => selectedIds.has(c.id) && c.website && c.pipeline_stage === 'qualified')
+      : companies.filter(c => c.website && c.pipeline_stage === 'qualified');
 
-  if (!confirm(`AI Enrich ${toEnrich.length} companies?\n\nThis uses Claude AI to:\n• Extract IČO & company segment\n• Scrape team pages for contacts (FREE)\n• Fallback to Hunter.io if needed\n• Validate emails via MX check`)) {
-    return;
-  }
+    if (!toEnrich.length) {
+      const qualified = companies.filter(c => c.pipeline_stage === 'qualified').length;
+      const raw = companies.filter(c => !c.pipeline_stage || c.pipeline_stage === 'raw').length;
+      alert(`No qualified companies to enrich.\n\n• ${raw} raw (need qualification first)\n• ${qualified} qualified\n\nQualify companies first, then enrich.`);
+      return;
+    }
+
+    // Show the enrich panel
+    enrichmentRunning = true;
+    enrichResultsList.innerHTML = '';
+    resetEnrichSteps();
+    enrichProgressText.textContent = `0 of ${toEnrich.length} companies`;
+    enrichProgressFill.style.width = '0%';
+    enrichCurrentName.textContent = '-';
+    showEnrichPanel();
 
   const btn = document.getElementById('waterfall-enrich-btn');
   const originalText = btn.innerHTML;
@@ -533,51 +596,144 @@ async function handleWaterfallEnrich() {
 
   let enriched = 0;
   let totalContacts = 0;
-  const errors = [];
 
   for (let i = 0; i < toEnrich.length; i++) {
+    if (!enrichmentRunning) break; // Allow cancellation
+
     const company = toEnrich[i];
-    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="waterfall-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" /></svg> ${i + 1}/${toEnrich.length}...`;
+
+    // Update overall progress
+    enrichProgressText.textContent = `${i + 1} of ${toEnrich.length} companies`;
+    enrichProgressFill.style.width = `${((i) / toEnrich.length) * 100}%`;
+    enrichCurrentName.textContent = company.name;
+
+    // Reset steps for new company
+    resetEnrichSteps();
+
+    // Simulate step-by-step progress (the actual API does this server-side)
+    // Step 1: Scrape website
+    setEnrichStep('scrape', 'active', 'Fetching...');
+    await new Promise(r => setTimeout(r, 300));
 
     try {
+      // Start the actual enrichment
+      setEnrichStep('scrape', 'done', 'Done');
+
+      // Step 2: AI Analysis
+      setEnrichStep('analyze', 'active', 'Processing with Claude...');
+      await new Promise(r => setTimeout(r, 200));
+
       const res = await fetch(`/api/companies/${company.id}/enrich-full`, { method: 'POST' });
+
       if (res.ok) {
         const data = await res.json();
+
+        // Mark AI analysis done
+        setEnrichStep('analyze', 'done', data.enrichment?.segment || 'Analyzed');
+
+        // Step 3: Contacts
+        setEnrichStep('contacts', 'active', 'Searching...');
+        await new Promise(r => setTimeout(r, 150));
+
+        const contactsFound = data.contacts?.length || 0;
+        if (contactsFound > 0) {
+          setEnrichStep('contacts', 'done', `${contactsFound} found`);
+
+          // Step 4: Validate
+          setEnrichStep('validate', 'active', 'Checking MX records...');
+          await new Promise(r => setTimeout(r, 150));
+          setEnrichStep('validate', 'done', 'Verified');
+
+          // Hunter not needed
+          setEnrichStep('hunter', 'skipped', 'Not needed');
+        } else {
+          setEnrichStep('contacts', 'done', 'None found');
+          setEnrichStep('validate', 'skipped', 'No emails');
+
+          // Step 5: Hunter fallback
+          if (data.enrichment_source?.includes('hunter')) {
+            setEnrichStep('hunter', 'active', 'Querying Hunter.io...');
+            await new Promise(r => setTimeout(r, 150));
+            setEnrichStep('hunter', 'done', 'Checked');
+          } else {
+            setEnrichStep('hunter', 'skipped', 'Skipped');
+          }
+        }
+
         enriched++;
+        totalContacts += contactsFound;
+
         // Update local data
         company.enrichment_source = 'waterfall_full';
         company.segment = data.enrichment?.segment;
         company.industry = data.enrichment?.industry;
         company.ico = data.enrichment?.ico;
+        company.pipeline_stage = 'enriched';
         if (data.contacts?.length > 0) {
-          totalContacts += data.contacts.length;
           company.contacts_count = data.contacts.length;
           const primary = data.contacts.find(c => c.email);
           if (primary) company.primary_email = primary.email;
         }
+
+        addEnrichResult(company, true, contactsFound > 0 ? `${contactsFound} contacts` : (data.enrichment?.segment || 'Enriched'));
+
       } else {
         const err = await res.json();
-        errors.push(`${company.name}: ${err.error}`);
+        setEnrichStep('analyze', 'error', err.error || 'Failed');
+        setEnrichStep('contacts', 'skipped');
+        setEnrichStep('validate', 'skipped');
+        setEnrichStep('hunter', 'skipped');
+        addEnrichResult(company, false, err.error || 'Error');
       }
     } catch (err) {
-      errors.push(`${company.name}: ${err.message}`);
+      setEnrichStep('scrape', 'error', 'Failed');
+      setEnrichStep('analyze', 'skipped');
+      setEnrichStep('contacts', 'skipped');
+      setEnrichStep('validate', 'skipped');
+      setEnrichStep('hunter', 'skipped');
+      addEnrichResult(company, false, err.message);
     }
 
-    // Delay between requests
-    await new Promise(r => setTimeout(r, 500));
+    // Small delay between companies
+    await new Promise(r => setTimeout(r, 300));
   }
+
+  // Final progress update
+  enrichProgressFill.style.width = '100%';
+  enrichProgressText.textContent = `Done! ${enriched} of ${toEnrich.length} enriched`;
+  enrichCurrentName.textContent = `Found ${totalContacts} contacts`;
+  resetEnrichSteps();
 
   btn.disabled = false;
   btn.innerHTML = originalText;
+  enrichmentRunning = false;
 
-  let msg = `Done! Enriched ${enriched}/${toEnrich.length} companies.\nFound ${totalContacts} contacts.`;
-  if (errors.length > 0) {
-    msg += `\n\n${errors.length} errors:\n${errors.slice(0, 5).join('\n')}`;
-    if (errors.length > 5) msg += `\n...and ${errors.length - 5} more`;
-  }
-  alert(msg);
   await loadCompanies(currentSearchId);
+  await updatePipelineStats();
+  } catch (error) {
+    alert('AI Enrich error: ' + error.message);
+    enrichmentRunning = false;
+    hideEnrichPanel();
+  }
 }
+
+// Close enrich panel handlers
+document.getElementById('close-enrich-panel').addEventListener('click', () => {
+  if (enrichmentRunning) {
+    if (confirm('Enrichment is still running. Stop and close?')) {
+      enrichmentRunning = false;
+      hideEnrichPanel();
+    }
+  } else {
+    hideEnrichPanel();
+  }
+});
+
+document.getElementById('enrich-backdrop').addEventListener('click', () => {
+  if (!enrichmentRunning) {
+    hideEnrichPanel();
+  }
+});
 
 async function handleSingleEnrich(id, btn) {
   const company = companies.find(c => c.id === id);
@@ -819,3 +975,414 @@ function formatSegmentBadge(segment, enrichmentSource) {
   const segmentClass = segment.toLowerCase().replace(/[^a-z]/g, '-');
   return `<span class="segment-badge ${segmentClass}">${escapeHtml(segment)}</span>`;
 }
+
+// ============ Pipeline Progress & Main Action ============
+
+async function updatePipelineStats() {
+  try {
+    const res = await fetch('/api/companies/stats');
+    pipelineStats = await res.json();
+
+    // Update labels
+    document.getElementById('stat-raw').textContent = pipelineStats.raw || 0;
+    document.getElementById('stat-qualified').textContent = pipelineStats.qualified || 0;
+    document.getElementById('stat-enriched').textContent = pipelineStats.enriched || 0;
+    document.getElementById('stat-ready').textContent = pipelineStats.ready || 0;
+
+    // Calculate percentages for progress bar
+    const total = pipelineStats.total || 1;
+    const rawPct = ((pipelineStats.raw || 0) / total) * 100;
+    const qualifiedPct = ((pipelineStats.qualified || 0) / total) * 100;
+    const enrichedPct = ((pipelineStats.enriched || 0) / total) * 100;
+    const readyPct = ((pipelineStats.ready || 0) / total) * 100;
+
+    // Update progress bar fills
+    document.querySelector('.progress-segment.raw .segment-fill').style.width = rawPct + '%';
+    document.querySelector('.progress-segment.qualified .segment-fill').style.width = qualifiedPct + '%';
+    document.querySelector('.progress-segment.enriched .segment-fill').style.width = enrichedPct + '%';
+    document.querySelector('.progress-segment.ready .segment-fill').style.width = readyPct + '%';
+
+    updateMainActionButton();
+  } catch (err) {
+    console.error('Failed to update pipeline stats:', err);
+  }
+}
+
+function updateMainActionButton() {
+  const btn = document.getElementById('main-action-btn');
+  const btnText = document.getElementById('main-action-text');
+
+  // Count companies at each stage
+  const rawCount = companies.filter(c =>
+    c.website &&
+    (c.pipeline_stage === 'raw' || !c.pipeline_stage) &&
+    c.in_notion !== 1
+  ).length;
+
+  const qualifiedCount = companies.filter(c =>
+    c.pipeline_stage === 'qualified' &&
+    c.website
+  ).length;
+
+  const enrichedCount = companies.filter(c =>
+    c.pipeline_stage === 'enriched'
+  ).length;
+
+  const readyCount = companies.filter(c =>
+    c.pipeline_stage === 'ready'
+  ).length;
+
+  // Remove all state classes
+  btn.classList.remove('qualify', 'enrich', 'done');
+
+  // Determine what the main action should be
+  if (rawCount > 0) {
+    btn.classList.add('qualify');
+    btnText.textContent = `▶ Qualify (${rawCount})`;
+    btn.disabled = false;
+    btn.dataset.action = 'qualify';
+  } else if (qualifiedCount > 0) {
+    btn.classList.add('enrich');
+    btnText.textContent = `✨ Enrich (${qualifiedCount})`;
+    btn.disabled = false;
+    btn.dataset.action = 'enrich';
+  } else if (readyCount > 0) {
+    btn.classList.add('done');
+    btnText.textContent = `✓ ${readyCount} Ready to Export`;
+    btn.disabled = true;
+    btn.dataset.action = 'done';
+  } else {
+    btnText.textContent = 'No Actions Available';
+    btn.disabled = true;
+    btn.dataset.action = 'none';
+  }
+}
+
+function handleProgressClick(stage) {
+  // Toggle filter
+  if (activeStageFilter === stage) {
+    activeStageFilter = '';
+  } else {
+    activeStageFilter = stage;
+  }
+
+  // Update active state on labels
+  document.querySelectorAll('.progress-label').forEach(label => {
+    label.classList.remove('active');
+    if (label.dataset.stage === activeStageFilter) {
+      label.classList.add('active');
+    }
+  });
+
+  document.querySelectorAll('.progress-segment').forEach(seg => {
+    seg.classList.remove('active');
+    if (seg.dataset.stage === activeStageFilter) {
+      seg.classList.add('active');
+    }
+  });
+
+  applyFilters();
+}
+
+async function handleMainAction() {
+  const btn = document.getElementById('main-action-btn');
+  const action = btn.dataset.action;
+
+  if (action === 'qualify') {
+    await handleQualifyAll();
+  } else if (action === 'enrich') {
+    await handleEnrichAll();
+  }
+}
+
+async function handleQualifyAll() {
+  const toQualify = companies.filter(c =>
+    c.website &&
+    (c.pipeline_stage === 'raw' || !c.pipeline_stage) &&
+    c.in_notion !== 1
+  );
+
+  if (!toQualify.length) {
+    alert('No companies to qualify.');
+    return;
+  }
+
+  const btn = document.getElementById('main-action-btn');
+  const btnText = document.getElementById('main-action-text');
+  const originalText = btnText.textContent;
+
+  btn.disabled = true;
+  btnText.innerHTML = '<span class="spinner"></span> Qualifying...';
+
+  try {
+    const res = await fetch('/api/companies/qualify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ all: true })
+    });
+
+    const result = await res.json();
+
+    if (res.ok) {
+      alert(`Qualification complete!\n\n✓ ${result.qualified} qualified\n🔗 ${result.in_notion} already in Notion`);
+      await loadCompanies(currentSearchId);
+      await updatePipelineStats();
+    } else {
+      throw new Error(result.error || 'Qualification failed');
+    }
+  } catch (err) {
+    alert('Error: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btnText.textContent = originalText;
+    updateMainActionButton();
+  }
+}
+
+async function handleEnrichAll() {
+  const toEnrich = companies.filter(c =>
+    c.pipeline_stage === 'qualified' &&
+    c.website
+  );
+
+  if (!toEnrich.length) {
+    alert('No companies to enrich. Qualify companies first.');
+    return;
+  }
+
+  // Use the existing waterfall enrich panel
+  handleWaterfallEnrich();
+}
+
+// ============ Notion Dedupe ============
+
+const dedupePanel = document.getElementById('dedupe-panel');
+const dedupeBackdrop = document.getElementById('dedupe-backdrop');
+const dedupeNotConfigured = document.getElementById('dedupe-not-configured');
+const dedupeLoading = document.getElementById('dedupe-loading');
+const dedupeResults = document.getElementById('dedupe-results');
+const dedupeList = document.getElementById('dedupe-list');
+
+let dedupeData = null;
+let selectedDupeIds = new Set();
+
+function showDedupePanel() {
+  dedupePanel.classList.remove('hidden');
+  dedupeBackdrop.classList.remove('hidden');
+}
+
+function hideDedupePanel() {
+  dedupePanel.classList.add('hidden');
+  dedupeBackdrop.classList.add('hidden');
+}
+
+function resetDedupePanel() {
+  dedupeNotConfigured.classList.add('hidden');
+  dedupeLoading.classList.add('hidden');
+  dedupeResults.classList.add('hidden');
+  dedupeList.innerHTML = '';
+  dedupeData = null;
+  selectedDupeIds.clear();
+}
+
+async function handleDedupe() {
+  if (!currentSearchId) {
+    alert('Please select a search first');
+    return;
+  }
+
+  resetDedupePanel();
+  showDedupePanel();
+
+  // Check Notion status
+  try {
+    const statusRes = await fetch('/api/notion/status');
+    const status = await statusRes.json();
+
+    if (!status.configured) {
+      dedupeNotConfigured.classList.remove('hidden');
+      return;
+    }
+  } catch (err) {
+    dedupeNotConfigured.classList.remove('hidden');
+    return;
+  }
+
+  // Show loading
+  dedupeLoading.classList.remove('hidden');
+
+  try {
+    const res = await fetch(`/api/notion/dedupe/search/${currentSearchId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Dedupe check failed');
+    }
+
+    dedupeData = await res.json();
+    dedupeLoading.classList.add('hidden');
+    renderDedupeResults();
+  } catch (err) {
+    dedupeLoading.classList.add('hidden');
+    alert('Error: ' + err.message);
+    hideDedupePanel();
+  }
+}
+
+function renderDedupeResults() {
+  if (!dedupeData) return;
+
+  // Update stats
+  document.getElementById('dedupe-unique-count').textContent = dedupeData.unique;
+  document.getElementById('dedupe-dupe-count').textContent = dedupeData.duplicates;
+  document.getElementById('dedupe-total-count').textContent = dedupeData.total;
+
+  // Render duplicate list
+  const dupes = dedupeData.results.filter(r => r.isDupe);
+
+  if (dupes.length === 0) {
+    dedupeList.innerHTML = '<div style="padding:20px;text-align:center;color:#6B7280;">No duplicates found!</div>';
+  } else {
+    // Pre-select all duplicates by default
+    dupes.forEach(d => selectedDupeIds.add(d.companyId));
+
+    dedupeList.innerHTML = dupes.map(dupe => `
+      <div class="dedupe-item" data-id="${dupe.companyId}">
+        <div class="dedupe-item-header">
+          <input type="checkbox" class="dedupe-item-checkbox" ${selectedDupeIds.has(dupe.companyId) ? 'checked' : ''}>
+          <div class="dedupe-item-info">
+            <div class="dedupe-item-name">${escapeHtml(dupe.companyName)}</div>
+            <div class="dedupe-item-domain">${escapeHtml(extractDomainFromUrl(dupe.companyWebsite))}</div>
+          </div>
+          <span class="dedupe-item-match-type ${dupe.matchType}">${dupe.matchType === 'domain' ? 'Domain Match' : 'Fuzzy Name'}</span>
+          <span class="dedupe-item-confidence">${Math.round(dupe.confidence * 100)}%</span>
+          <div class="dedupe-item-toggle">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="16" height="16">
+              <path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+            </svg>
+          </div>
+        </div>
+        <div class="dedupe-item-matches">
+          <div style="font-size:11px;color:#6B7280;margin-bottom:8px;">Matches in Notion CRM:</div>
+          ${dupe.matches.map(m => `
+            <div class="dedupe-match">
+              <div class="dedupe-match-name">${escapeHtml(m.name || 'Unknown')}</div>
+              ${m.organizaceUrl ? `<div class="dedupe-match-url">${escapeHtml(m.organizaceUrl)}</div>` : ''}
+              ${m.email ? `<div class="dedupe-match-email">${escapeHtml(m.email)}</div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `).join('');
+
+    // Add event listeners
+    dedupeList.querySelectorAll('.dedupe-item-header').forEach(header => {
+      header.addEventListener('click', (e) => {
+        if (e.target.type === 'checkbox') return;
+        const item = header.closest('.dedupe-item');
+        item.classList.toggle('expanded');
+      });
+    });
+
+    dedupeList.querySelectorAll('.dedupe-item-checkbox').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        e.stopPropagation();
+        const id = parseInt(cb.closest('.dedupe-item').dataset.id);
+        if (cb.checked) {
+          selectedDupeIds.add(id);
+        } else {
+          selectedDupeIds.delete(id);
+        }
+      });
+    });
+  }
+
+  dedupeResults.classList.remove('hidden');
+}
+
+function extractDomainFromUrl(url) {
+  if (!url) return '-';
+  return url.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
+}
+
+async function handleDeleteDupes() {
+  if (selectedDupeIds.size === 0) {
+    alert('No duplicates selected');
+    return;
+  }
+
+  if (!confirm(`Delete ${selectedDupeIds.size} duplicate companies from the scraper?\n\nThis will NOT affect your Notion CRM.`)) {
+    return;
+  }
+
+  try {
+    await fetch('/api/companies/bulk-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: Array.from(selectedDupeIds) })
+    });
+
+    companies = companies.filter(c => !selectedDupeIds.has(c.id));
+    filteredCompanies = filteredCompanies.filter(c => !selectedDupeIds.has(c.id));
+
+    hideDedupePanel();
+    renderCompanies();
+    alert(`Deleted ${selectedDupeIds.size} duplicates`);
+    selectedDupeIds.clear();
+  } catch (err) {
+    alert('Error deleting: ' + err.message);
+  }
+}
+
+async function handleExportUniqueToNotion() {
+  if (!dedupeData) return;
+
+  const uniqueIds = dedupeData.results
+    .filter(r => !r.isDupe)
+    .map(r => r.companyId);
+
+  if (uniqueIds.length === 0) {
+    alert('No unique leads to export');
+    return;
+  }
+
+  if (!confirm(`Export ${uniqueIds.length} unique leads to Notion CRM?`)) {
+    return;
+  }
+
+  const btn = document.getElementById('dedupe-export-unique');
+  btn.disabled = true;
+  btn.textContent = 'Exporting...';
+
+  try {
+    const res = await fetch('/api/notion/export/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ companyIds: uniqueIds })
+    });
+
+    const result = await res.json();
+
+    if (res.ok) {
+      alert(`Exported ${result.exported} leads to Notion!\n${result.skippedDupes} skipped as duplicates.\n${result.errors.length} errors.`);
+      hideDedupePanel();
+    } else {
+      throw new Error(result.error);
+    }
+  } catch (err) {
+    alert('Export failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Export Unique to Notion';
+  }
+}
+
+// Dedupe event listeners
+document.getElementById('dedupe-btn').addEventListener('click', handleDedupe);
+document.getElementById('close-dedupe-panel').addEventListener('click', hideDedupePanel);
+document.getElementById('dedupe-backdrop').addEventListener('click', hideDedupePanel);
+document.getElementById('dedupe-delete-dupes').addEventListener('click', handleDeleteDupes);
+document.getElementById('dedupe-export-unique').addEventListener('click', handleExportUniqueToNotion);
