@@ -7,7 +7,8 @@ let selectedIds = new Set();
 let sortColumn = 'name';
 let sortDirection = 'asc';
 let activeStageFilter = '';
-let pipelineStats = { raw: 0, qualified: 0, classified: 0, enriched: 0, ready: 0, in_notion: 0, total: 0 };
+let pipelineStats = { raw: 0, enriched: 0, review: 0, qualified: 0, ready: 0, in_notion: 0, total: 0 };
+let rowStatuses = new Map(); // Track inline status per row
 
 // DOM Elements
 const dashboardView = document.getElementById('dashboard-view');
@@ -39,15 +40,22 @@ function setupEventListeners() {
 
   // Filters
   document.getElementById('search-filter').addEventListener('input', debounce(applyFilters, 200));
-  document.getElementById('segment-filter').addEventListener('change', applyFilters);
 
-  // Progress bar segment clicks
-  document.querySelectorAll('.progress-segment').forEach(seg => {
-    seg.addEventListener('click', () => handleProgressClick(seg.dataset.stage));
+  // Custom segment dropdown
+  document.getElementById('segment-filter-btn').addEventListener('click', toggleSegmentDropdown);
+  document.querySelectorAll('.custom-select-option').forEach(opt => {
+    opt.addEventListener('click', () => selectSegment(opt));
   });
-  document.querySelectorAll('.progress-label').forEach(label => {
-    label.addEventListener('click', () => handleProgressClick(label.dataset.stage));
+  document.addEventListener('click', closeSegmentDropdownOnClickOutside);
+
+  // Stage pill clicks
+  document.querySelectorAll('.stage-pill').forEach(pill => {
+    pill.addEventListener('click', () => handleProgressClick(pill.dataset.stage));
   });
+
+  // More menu toggle
+  document.getElementById('more-menu-btn').addEventListener('click', toggleMoreMenu);
+  document.addEventListener('click', closeMoreMenuOnClickOutside);
 
   // Main action button
   document.getElementById('main-action-btn').addEventListener('click', handleMainAction);
@@ -60,6 +68,12 @@ function setupEventListeners() {
 
   // Export
   document.getElementById('export-btn').addEventListener('click', handleExport);
+
+  // Dedupe button
+  document.getElementById('dedupe-btn').addEventListener('click', handleDedupe);
+
+  // Push to Notion button
+  document.getElementById('push-notion-btn').addEventListener('click', handlePushToNotion);
 
   // Close panel
   document.getElementById('close-panel').addEventListener('click', () => fullViewPanel.classList.add('hidden'));
@@ -75,6 +89,65 @@ function setupEventListeners() {
       if (e.target === modal) hideModal(modal);
     });
   });
+}
+
+// More menu helpers
+function toggleMoreMenu(e) {
+  e.stopPropagation();
+  document.getElementById('more-dropdown').classList.toggle('hidden');
+}
+
+function closeMoreMenuOnClickOutside(e) {
+  const toolbarMore = document.querySelector('.toolbar-more');
+  const dropdown = document.getElementById('more-dropdown');
+
+  // Close dropdown if click is outside the toolbar-more container
+  if (toolbarMore && dropdown && !toolbarMore.contains(e.target)) {
+    dropdown.classList.add('hidden');
+  }
+}
+
+// Segment dropdown helpers
+function toggleSegmentDropdown(e) {
+  e.stopPropagation();
+  const wrapper = document.getElementById('segment-filter-wrapper');
+  const dropdown = document.getElementById('segment-filter-dropdown');
+  wrapper.classList.toggle('open');
+  dropdown.classList.toggle('hidden');
+}
+
+function selectSegment(option) {
+  const value = option.dataset.value;
+  const text = option.textContent;
+
+  // Update hidden input
+  document.getElementById('segment-filter').value = value;
+
+  // Update button text
+  document.getElementById('segment-filter-text').textContent = text;
+
+  // Update selected state
+  document.querySelectorAll('.custom-select-option').forEach(opt => {
+    opt.classList.remove('selected');
+  });
+  option.classList.add('selected');
+
+  // Close dropdown
+  document.getElementById('segment-filter-wrapper').classList.remove('open');
+  document.getElementById('segment-filter-dropdown').classList.add('hidden');
+
+  // Apply filter
+  applyFilters();
+}
+
+function closeSegmentDropdownOnClickOutside(e) {
+  const wrapper = document.getElementById('segment-filter-wrapper');
+  const dropdown = document.getElementById('segment-filter-dropdown');
+
+  if (wrapper && dropdown && !wrapper.contains(e.target)) {
+    wrapper.classList.remove('open');
+    dropdown.classList.add('hidden');
+  }
 }
 
 // ============ API Calls ============
@@ -128,7 +201,14 @@ function renderSearches(searches) {
   searchesList.innerHTML = searches.map(s => `
     <div class="search-card" data-id="${s.id}">
       <div class="search-card-info">
-        <h3>${escapeHtml(s.query)}</h3>
+        <div class="search-card-title">
+          <h3>${escapeHtml(s.query)}</h3>
+          <button class="search-delete-btn" title="Delete search">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16">
+              <path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+            </svg>
+          </button>
+        </div>
         <div class="meta">${escapeHtml(s.location)} &bull; ${formatDate(s.created_at)} &bull; ${s.grid_size} grid</div>
       </div>
       <div class="search-card-stats">
@@ -141,7 +221,30 @@ function renderSearches(searches) {
 
   // Add click handlers
   searchesList.querySelectorAll('.search-card').forEach(card => {
-    card.addEventListener('click', () => showResults(card.dataset.id));
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('.search-delete-btn')) return;
+      showResults(card.dataset.id);
+    });
+  });
+
+  // Add delete handlers
+  searchesList.querySelectorAll('.search-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const card = btn.closest('.search-card');
+      const searchId = card.dataset.id;
+      const searchName = card.querySelector('h3').textContent;
+
+      if (confirm(`Delete search "${searchName}" and all its results?`)) {
+        try {
+          await fetch(`/api/searches/${searchId}`, { method: 'DELETE' });
+          loadSearches();
+        } catch (err) {
+          console.error('Failed to delete search:', err);
+          alert('Failed to delete search');
+        }
+      }
+    });
   });
 }
 
@@ -149,18 +252,21 @@ function renderCompanies() {
   const sorted = sortCompanies(filteredCompanies);
 
   if (!sorted.length) {
-    resultsBody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;">No results found</td></tr>';
+    resultsBody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;">No results found</td></tr>';
     document.getElementById('results-count').textContent = '';
     return;
   }
 
-  resultsBody.innerHTML = sorted.map(c => `
+  resultsBody.innerHTML = sorted.map(c => {
+    const status = rowStatuses.get(c.id) || { text: formatStageStatus(c.pipeline_stage), state: 'idle' };
+    return `
     <tr data-id="${c.id}">
       <td><input type="checkbox" class="row-checkbox" ${selectedIds.has(c.id) ? 'checked' : ''}></td>
       <td>${escapeHtml(c.name || '-')}</td>
       <td>${escapeHtml(extractCity(c.address))}</td>
       <td>${c.website ? `<a href="${escapeHtml(c.website)}" target="_blank">${escapeHtml(formatWebsiteUrl(c.website))}</a>` : '<span style="color:#9CA3AF">-</span>'}</td>
       <td>${formatSegmentBadge(c.segment, c.enrichment_source)}</td>
+      <td class="status-cell"><span class="status-${status.state}">${status.text}</span></td>
       <td>
         <div class="action-icons">
           <button class="icon-btn view-btn" title="View details">
@@ -177,7 +283,7 @@ function renderCompanies() {
         </div>
       </td>
     </tr>
-  `).join('');
+  `}).join('');
 
   document.getElementById('results-count').textContent = `Showing ${sorted.length} of ${companies.length} companies`;
 
@@ -390,6 +496,8 @@ function handleSelectAll(e) {
     selectedIds.clear();
   }
   updateDeleteButton();
+  updateMainActionButton();
+  updatePushNotionButton();
   renderCompanies();
 }
 
@@ -401,6 +509,8 @@ function handleRowSelect(e) {
     selectedIds.delete(id);
   }
   updateDeleteButton();
+  updateMainActionButton();
+  updatePushNotionButton();
 }
 
 function updateDeleteButton() {
@@ -976,6 +1086,17 @@ function formatSegmentBadge(segment, enrichmentSource) {
   return `<span class="segment-badge ${segmentClass}">${escapeHtml(segment)}</span>`;
 }
 
+function formatStageStatus(stage) {
+  const stageLabels = {
+    raw: 'Raw',
+    enriched: 'Enriched',
+    review: 'Review',
+    qualified: 'Qualified',
+    ready: 'Ready'
+  };
+  return stageLabels[stage] || stageLabels.raw;
+}
+
 // ============ Pipeline Progress & Main Action ============
 
 async function updatePipelineStats() {
@@ -983,26 +1104,15 @@ async function updatePipelineStats() {
     const res = await fetch('/api/companies/stats');
     pipelineStats = await res.json();
 
-    // Update labels
+    // Update labels for new pipeline: Raw → Enriched → Review → Qualified → Ready
     document.getElementById('stat-raw').textContent = pipelineStats.raw || 0;
-    document.getElementById('stat-qualified').textContent = pipelineStats.qualified || 0;
     document.getElementById('stat-enriched').textContent = pipelineStats.enriched || 0;
+    document.getElementById('stat-review').textContent = pipelineStats.review || 0;
+    document.getElementById('stat-qualified').textContent = pipelineStats.qualified || 0;
     document.getElementById('stat-ready').textContent = pipelineStats.ready || 0;
 
-    // Calculate percentages for progress bar
-    const total = pipelineStats.total || 1;
-    const rawPct = ((pipelineStats.raw || 0) / total) * 100;
-    const qualifiedPct = ((pipelineStats.qualified || 0) / total) * 100;
-    const enrichedPct = ((pipelineStats.enriched || 0) / total) * 100;
-    const readyPct = ((pipelineStats.ready || 0) / total) * 100;
-
-    // Update progress bar fills
-    document.querySelector('.progress-segment.raw .segment-fill').style.width = rawPct + '%';
-    document.querySelector('.progress-segment.qualified .segment-fill').style.width = qualifiedPct + '%';
-    document.querySelector('.progress-segment.enriched .segment-fill').style.width = enrichedPct + '%';
-    document.querySelector('.progress-segment.ready .segment-fill').style.width = readyPct + '%';
-
     updateMainActionButton();
+    updatePushNotionButton();
   } catch (err) {
     console.error('Failed to update pipeline stats:', err);
   }
@@ -1011,74 +1121,80 @@ async function updatePipelineStats() {
 function updateMainActionButton() {
   const btn = document.getElementById('main-action-btn');
   const btnText = document.getElementById('main-action-text');
-
-  // Count companies at each stage
-  const rawCount = companies.filter(c =>
-    c.website &&
-    (c.pipeline_stage === 'raw' || !c.pipeline_stage) &&
-    c.in_notion !== 1
-  ).length;
-
-  const qualifiedCount = companies.filter(c =>
-    c.pipeline_stage === 'qualified' &&
-    c.website
-  ).length;
-
-  const enrichedCount = companies.filter(c =>
-    c.pipeline_stage === 'enriched'
-  ).length;
-
-  const readyCount = companies.filter(c =>
-    c.pipeline_stage === 'ready'
-  ).length;
+  const selectedCount = selectedIds.size;
 
   // Remove all state classes
-  btn.classList.remove('qualify', 'enrich', 'done');
+  btn.classList.remove('qualify', 'enrich', 'review', 'approve', 'done');
 
-  // Determine what the main action should be
-  if (rawCount > 0) {
-    btn.classList.add('qualify');
-    btnText.textContent = `▶ Qualify (${rawCount})`;
-    btn.disabled = false;
-    btn.dataset.action = 'qualify';
-  } else if (qualifiedCount > 0) {
+  // Get selected companies' stages
+  const selectedCompanies = companies.filter(c => selectedIds.has(c.id));
+  const selectedRaw = selectedCompanies.filter(c =>
+    c.website && (!c.pipeline_stage || c.pipeline_stage === 'raw')
+  ).length;
+  const selectedEnriched = selectedCompanies.filter(c =>
+    c.pipeline_stage === 'enriched'
+  ).length;
+  const selectedReview = selectedCompanies.filter(c =>
+    c.pipeline_stage === 'review'
+  ).length;
+
+  // Require checkbox selection for all actions
+  if (selectedCount === 0) {
+    btnText.textContent = 'Select leads to enrich';
+    btn.disabled = true;
+    btn.dataset.action = 'none';
+    return;
+  }
+
+  // Determine action based on selected leads' stages
+  if (selectedRaw > 0) {
     btn.classList.add('enrich');
-    btnText.textContent = `✨ Enrich (${qualifiedCount})`;
+    btnText.textContent = `✨ Enrich (${selectedRaw})`;
     btn.disabled = false;
     btn.dataset.action = 'enrich';
-  } else if (readyCount > 0) {
-    btn.classList.add('done');
-    btnText.textContent = `✓ ${readyCount} Ready to Export`;
-    btn.disabled = true;
-    btn.dataset.action = 'done';
+  } else if (selectedEnriched > 0) {
+    btn.classList.add('review');
+    btnText.textContent = `→ Move to Review (${selectedEnriched})`;
+    btn.disabled = false;
+    btn.dataset.action = 'move-to-review';
+  } else if (selectedReview > 0) {
+    btn.classList.add('approve');
+    btnText.textContent = `✓ Approve (${selectedReview})`;
+    btn.disabled = false;
+    btn.dataset.action = 'approve';
   } else {
-    btnText.textContent = 'No Actions Available';
+    btnText.textContent = `${selectedCount} selected`;
     btn.disabled = true;
     btn.dataset.action = 'none';
   }
 }
 
-function handleProgressClick(stage) {
-  // Toggle filter
-  if (activeStageFilter === stage) {
-    activeStageFilter = '';
+function updatePushNotionButton() {
+  const btn = document.getElementById('push-notion-btn');
+  const countSpan = document.getElementById('notion-count');
+  const selectedCount = selectedIds.size;
+
+  // Only enable when leads are selected
+  if (selectedCount > 0) {
+    btn.disabled = false;
+    countSpan.textContent = `(${selectedCount})`;
+    btn.title = `Push ${selectedCount} leads to Notion`;
   } else {
-    activeStageFilter = stage;
+    btn.disabled = true;
+    countSpan.textContent = '';
+    btn.title = 'Select leads first';
   }
+}
 
-  // Update active state on labels
-  document.querySelectorAll('.progress-label').forEach(label => {
-    label.classList.remove('active');
-    if (label.dataset.stage === activeStageFilter) {
-      label.classList.add('active');
-    }
-  });
+function handleProgressClick(stage) {
+  // Toggle filter: clicking the active stage clears the filter
+  activeStageFilter = (activeStageFilter === stage) ? '' : stage;
 
-  document.querySelectorAll('.progress-segment').forEach(seg => {
-    seg.classList.remove('active');
-    if (seg.dataset.stage === activeStageFilter) {
-      seg.classList.add('active');
-    }
+  // Update active state on pills
+  // When no filter is active, default to showing "raw" as the active pill
+  const activePillStage = activeStageFilter || 'raw';
+  document.querySelectorAll('.stage-pill').forEach(pill => {
+    pill.classList.toggle('active', pill.dataset.stage === activePillStage);
   });
 
   applyFilters();
@@ -1088,70 +1204,170 @@ async function handleMainAction() {
   const btn = document.getElementById('main-action-btn');
   const action = btn.dataset.action;
 
-  if (action === 'qualify') {
-    await handleQualifyAll();
-  } else if (action === 'enrich') {
-    await handleEnrichAll();
+  if (action === 'enrich') {
+    await handleEnrichSelected();
+  } else if (action === 'move-to-review') {
+    await handleMoveToReview();
+  } else if (action === 'approve') {
+    await handleApproveSelected();
   }
 }
 
-async function handleQualifyAll() {
-  const toQualify = companies.filter(c =>
+async function handleEnrichSelected() {
+  const selectedCompanies = companies.filter(c =>
+    selectedIds.has(c.id) &&
     c.website &&
-    (c.pipeline_stage === 'raw' || !c.pipeline_stage) &&
-    c.in_notion !== 1
+    (!c.pipeline_stage || c.pipeline_stage === 'raw')
   );
 
-  if (!toQualify.length) {
-    alert('No companies to qualify.');
+  if (!selectedCompanies.length) {
+    alert('No raw leads selected to enrich.');
     return;
   }
 
   const btn = document.getElementById('main-action-btn');
   const btnText = document.getElementById('main-action-text');
-  const originalText = btnText.textContent;
-
   btn.disabled = true;
-  btnText.innerHTML = '<span class="spinner"></span> Qualifying...';
+  btnText.innerHTML = '<span class="spinner"></span> Enriching...';
+
+  // Process each selected company with inline status updates
+  for (const company of selectedCompanies) {
+    setRowStatus(company.id, 'Enriching...', 'processing');
+
+    try {
+      const res = await fetch(`/api/companies/${company.id}/enrich-full`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      if (res.ok) {
+        setRowStatus(company.id, '✓ Done', 'done');
+      } else {
+        const err = await res.json();
+        setRowStatus(company.id, '✗ Error', 'error');
+        console.error(`Enrich failed for ${company.name}:`, err);
+      }
+    } catch (err) {
+      setRowStatus(company.id, '✗ Error', 'error');
+      console.error(`Enrich failed for ${company.name}:`, err);
+    }
+  }
+
+  // Reload and update
+  await loadCompanies(currentSearchId);
+  await updatePipelineStats();
+  selectedIds.clear();
+  updateMainActionButton();
+  updatePushNotionButton();
+}
+
+async function handleMoveToReview() {
+  const ids = Array.from(selectedIds);
+  if (!ids.length) return;
+
+  const btn = document.getElementById('main-action-btn');
+  btn.disabled = true;
+
+  for (const id of ids) {
+    setRowStatus(id, 'Moving...', 'processing');
+    try {
+      await fetch(`/api/companies/${id}/stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage: 'review' })
+      });
+      setRowStatus(id, '✓ Done', 'done');
+    } catch (err) {
+      setRowStatus(id, '✗ Error', 'error');
+    }
+  }
+
+  await loadCompanies(currentSearchId);
+  await updatePipelineStats();
+  selectedIds.clear();
+  updateMainActionButton();
+}
+
+async function handleApproveSelected() {
+  const ids = Array.from(selectedIds);
+  if (!ids.length) return;
+
+  const btn = document.getElementById('main-action-btn');
+  btn.disabled = true;
 
   try {
-    const res = await fetch('/api/companies/qualify', {
+    const res = await fetch('/api/companies/approve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ all: true })
+      body: JSON.stringify({ companyIds: ids })
+    });
+
+    const result = await res.json();
+    if (res.ok) {
+      alert(`✓ ${result.approved} leads approved`);
+    }
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
+
+  await loadCompanies(currentSearchId);
+  await updatePipelineStats();
+  selectedIds.clear();
+  updateMainActionButton();
+}
+
+async function handlePushToNotion() {
+  const ids = Array.from(selectedIds);
+  if (!ids.length) {
+    alert('Select leads to push to Notion first.');
+    return;
+  }
+
+  const btn = document.getElementById('push-notion-btn');
+  btn.disabled = true;
+
+  for (const id of ids) {
+    setRowStatus(id, 'Pushing...', 'processing');
+  }
+
+  try {
+    const res = await fetch('/api/companies/push-to-notion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ companyIds: ids })
     });
 
     const result = await res.json();
 
-    if (res.ok) {
-      alert(`Qualification complete!\n\n✓ ${result.qualified} qualified\n🔗 ${result.in_notion} already in Notion`);
-      await loadCompanies(currentSearchId);
-      await updatePipelineStats();
-    } else {
-      throw new Error(result.error || 'Qualification failed');
+    // Update statuses
+    for (const page of result.pages) {
+      setRowStatus(page.companyId, '✓ Pushed', 'done');
     }
+    for (const err of result.errors) {
+      setRowStatus(err.companyId, '✗ Error', 'error');
+    }
+
+    alert(`Pushed ${result.pushed} leads to Notion\n${result.skipped} skipped (already in Notion)\n${result.errors.length} errors`);
   } catch (err) {
     alert('Error: ' + err.message);
-  } finally {
-    btn.disabled = false;
-    btnText.textContent = originalText;
-    updateMainActionButton();
   }
+
+  await loadCompanies(currentSearchId);
+  await updatePipelineStats();
+  selectedIds.clear();
+  updateMainActionButton();
+  updatePushNotionButton();
 }
 
-async function handleEnrichAll() {
-  const toEnrich = companies.filter(c =>
-    c.pipeline_stage === 'qualified' &&
-    c.website
-  );
-
-  if (!toEnrich.length) {
-    alert('No companies to enrich. Qualify companies first.');
-    return;
+function setRowStatus(companyId, text, state) {
+  rowStatuses.set(companyId, { text, state });
+  const row = document.querySelector(`tr[data-id="${companyId}"]`);
+  if (row) {
+    const statusCell = row.querySelector('.status-cell');
+    if (statusCell) {
+      statusCell.innerHTML = `<span class="status-${state}">${text}</span>`;
+    }
   }
-
-  // Use the existing waterfall enrich panel
-  handleWaterfallEnrich();
 }
 
 // ============ Notion Dedupe ============
