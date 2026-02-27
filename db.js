@@ -101,11 +101,15 @@ addColumnIfMissing('companies', 'segment', 'TEXT');
 addColumnIfMissing('companies', 'industry', 'TEXT');
 addColumnIfMissing('companies', 'company_size', 'TEXT');
 addColumnIfMissing('companies', 'enrichment_source', 'TEXT');
+addColumnIfMissing('companies', 'company_description', 'TEXT');
 
 // Pipeline stage columns
 addColumnIfMissing('companies', 'pipeline_stage', "TEXT DEFAULT 'raw'");
 addColumnIfMissing('companies', 'in_notion', 'INTEGER DEFAULT 0');
 addColumnIfMissing('companies', 'qualified_at', 'DATETIME');
+
+// Migration: Remove 'review' stage - move to 'enriched'
+db.exec(`UPDATE companies SET pipeline_stage = 'enriched' WHERE pipeline_stage = 'review'`);
 
 // Contact enrichment columns
 addColumnIfMissing('contacts', 'phone', 'TEXT');
@@ -419,9 +423,8 @@ function getPipelineStats() {
   const stats = db.prepare(`
     SELECT
       SUM(CASE WHEN pipeline_stage = 'raw' OR pipeline_stage IS NULL THEN 1 ELSE 0 END) as raw,
-      SUM(CASE WHEN pipeline_stage = 'qualified' THEN 1 ELSE 0 END) as qualified,
-      SUM(CASE WHEN pipeline_stage = 'classified' THEN 1 ELSE 0 END) as classified,
       SUM(CASE WHEN pipeline_stage = 'enriched' THEN 1 ELSE 0 END) as enriched,
+      SUM(CASE WHEN pipeline_stage = 'qualified' THEN 1 ELSE 0 END) as qualified,
       SUM(CASE WHEN pipeline_stage = 'ready' THEN 1 ELSE 0 END) as ready,
       SUM(CASE WHEN in_notion = 1 THEN 1 ELSE 0 END) as in_notion,
       COUNT(*) as total
@@ -430,9 +433,8 @@ function getPipelineStats() {
 
   return {
     raw: stats.raw || 0,
-    qualified: stats.qualified || 0,
-    classified: stats.classified || 0,
     enriched: stats.enriched || 0,
+    qualified: stats.qualified || 0,
     ready: stats.ready || 0,
     in_notion: stats.in_notion || 0,
     total: stats.total || 0
@@ -445,7 +447,7 @@ function getPipelineStats() {
  * @param {string} stage - New pipeline stage
  */
 function updatePipelineStage(id, stage) {
-  const validStages = ['raw', 'qualified', 'classified', 'enriched', 'ready'];
+  const validStages = ['raw', 'enriched', 'qualified', 'ready'];
   if (!validStages.includes(stage)) {
     throw new Error(`Invalid pipeline stage: ${stage}`);
   }
@@ -502,6 +504,137 @@ function getCompaniesForClassification() {
   `).all();
 }
 
+/**
+ * Extract domain from URL
+ * @param {string} url - Website URL
+ * @returns {string} Domain without protocol/www
+ */
+function extractDomain(url) {
+  if (!url) return null;
+  try {
+    let domain = url.toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/^www\./, '')
+      .split('/')[0]
+      .split('?')[0];
+    return domain;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Simple string similarity (Levenshtein-based)
+ * @param {string} a - First string
+ * @param {string} b - Second string
+ * @returns {number} Similarity score 0-1
+ */
+function stringSimilarity(a, b) {
+  if (!a || !b) return 0;
+  const s1 = a.toLowerCase().trim();
+  const s2 = b.toLowerCase().trim();
+  if (s1 === s2) return 1;
+
+  const longer = s1.length > s2.length ? s1 : s2;
+  const shorter = s1.length > s2.length ? s2 : s1;
+
+  if (longer.length === 0) return 1;
+
+  // Simple Levenshtein distance
+  const matrix = [];
+  for (let i = 0; i <= shorter.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= longer.length; j++) {
+    matrix[0][j] = j;
+  }
+  for (let i = 1; i <= shorter.length; i++) {
+    for (let j = 1; j <= longer.length; j++) {
+      if (shorter[i - 1] === longer[j - 1]) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+
+  const distance = matrix[shorter.length][longer.length];
+  return (longer.length - distance) / longer.length;
+}
+
+/**
+ * Find local duplicates for a company (same domain or similar name)
+ * @param {number} companyId - Company ID to check
+ * @param {number} threshold - Similarity threshold for name matching (default 0.85)
+ * @returns {Array} Matching companies with match type and confidence
+ */
+function getLocalDuplicates(companyId, threshold = 0.85) {
+  const company = getCompanyById(companyId);
+  if (!company) return [];
+
+  const domain = extractDomain(company.website);
+  const matches = [];
+
+  // Get all other companies
+  const others = db.prepare(`
+    SELECT * FROM companies WHERE id != ?
+  `).all(companyId);
+
+  for (const other of others) {
+    const otherDomain = extractDomain(other.website);
+
+    // Check domain match
+    if (domain && otherDomain && domain === otherDomain) {
+      matches.push({
+        ...other,
+        matchType: 'domain',
+        confidence: 0.95
+      });
+      continue;
+    }
+
+    // Check name similarity
+    const similarity = stringSimilarity(company.name, other.name);
+    if (similarity >= threshold) {
+      matches.push({
+        ...other,
+        matchType: 'fuzzy_name',
+        confidence: similarity
+      });
+    }
+  }
+
+  return matches.sort((a, b) => b.confidence - a.confidence);
+}
+
+/**
+ * Get all distinct segments from companies
+ * @returns {Array} Unique segment values
+ */
+function getDistinctSegments() {
+  return db.prepare(`
+    SELECT DISTINCT segment FROM companies
+    WHERE segment IS NOT NULL AND segment != ''
+    ORDER BY segment ASC
+  `).all().map(r => r.segment);
+}
+
+/**
+ * Update company description
+ * @param {number} id - Company ID
+ * @param {string} description - One-sentence description
+ */
+function updateCompanyDescription(id, description) {
+  db.prepare(`
+    UPDATE companies SET company_description = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(description, id);
+}
+
 module.exports = {
   db,
   createSearch,
@@ -535,5 +668,10 @@ module.exports = {
   updatePipelineStage,
   markInNotion,
   getCompaniesForQualification,
-  getCompaniesForClassification
+  getCompaniesForClassification,
+  // New pipeline functions
+  getLocalDuplicates,
+  getDistinctSegments,
+  updateCompanyDescription,
+  extractDomain
 };

@@ -7,7 +7,7 @@ let selectedIds = new Set();
 let sortColumn = 'name';
 let sortDirection = 'asc';
 let activeStageFilter = '';
-let pipelineStats = { raw: 0, enriched: 0, review: 0, qualified: 0, ready: 0, in_notion: 0, total: 0 };
+let pipelineStats = { raw: 0, enriched: 0, qualified: 0, ready: 0, in_notion: 0, total: 0 };
 let rowStatuses = new Map(); // Track inline status per row
 
 // DOM Elements
@@ -1090,7 +1090,6 @@ function formatStageStatus(stage) {
   const stageLabels = {
     raw: 'Raw',
     enriched: 'Enriched',
-    review: 'Review',
     qualified: 'Qualified',
     ready: 'Ready'
   };
@@ -1104,10 +1103,9 @@ async function updatePipelineStats() {
     const res = await fetch('/api/companies/stats');
     pipelineStats = await res.json();
 
-    // Update labels for new pipeline: Raw → Enriched → Review → Qualified → Ready
+    // Update labels for pipeline: Raw → Enriched → Qualified → Ready
     document.getElementById('stat-raw').textContent = pipelineStats.raw || 0;
     document.getElementById('stat-enriched').textContent = pipelineStats.enriched || 0;
-    document.getElementById('stat-review').textContent = pipelineStats.review || 0;
     document.getElementById('stat-qualified').textContent = pipelineStats.qualified || 0;
     document.getElementById('stat-ready').textContent = pipelineStats.ready || 0;
 
@@ -1124,7 +1122,7 @@ function updateMainActionButton() {
   const selectedCount = selectedIds.size;
 
   // Remove all state classes
-  btn.classList.remove('qualify', 'enrich', 'review', 'approve', 'done');
+  btn.classList.remove('qualify', 'enrich', 'approve', 'done');
 
   // Get selected companies' stages
   const selectedCompanies = companies.filter(c => selectedIds.has(c.id));
@@ -1133,9 +1131,6 @@ function updateMainActionButton() {
   ).length;
   const selectedEnriched = selectedCompanies.filter(c =>
     c.pipeline_stage === 'enriched'
-  ).length;
-  const selectedReview = selectedCompanies.filter(c =>
-    c.pipeline_stage === 'review'
   ).length;
 
   // Require checkbox selection for all actions
@@ -1153,13 +1148,8 @@ function updateMainActionButton() {
     btn.disabled = false;
     btn.dataset.action = 'enrich';
   } else if (selectedEnriched > 0) {
-    btn.classList.add('review');
-    btnText.textContent = `→ Move to Review (${selectedEnriched})`;
-    btn.disabled = false;
-    btn.dataset.action = 'move-to-review';
-  } else if (selectedReview > 0) {
     btn.classList.add('approve');
-    btnText.textContent = `✓ Approve (${selectedReview})`;
+    btnText.textContent = `✓ Approve (${selectedEnriched})`;
     btn.disabled = false;
     btn.dataset.action = 'approve';
   } else {
@@ -1206,8 +1196,6 @@ async function handleMainAction() {
 
   if (action === 'enrich') {
     await handleEnrichSelected();
-  } else if (action === 'move-to-review') {
-    await handleMoveToReview();
   } else if (action === 'approve') {
     await handleApproveSelected();
   }
@@ -1259,33 +1247,6 @@ async function handleEnrichSelected() {
   selectedIds.clear();
   updateMainActionButton();
   updatePushNotionButton();
-}
-
-async function handleMoveToReview() {
-  const ids = Array.from(selectedIds);
-  if (!ids.length) return;
-
-  const btn = document.getElementById('main-action-btn');
-  btn.disabled = true;
-
-  for (const id of ids) {
-    setRowStatus(id, 'Moving...', 'processing');
-    try {
-      await fetch(`/api/companies/${id}/stage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stage: 'review' })
-      });
-      setRowStatus(id, '✓ Done', 'done');
-    } catch (err) {
-      setRowStatus(id, '✗ Error', 'error');
-    }
-  }
-
-  await loadCompanies(currentSearchId);
-  await updatePipelineStats();
-  selectedIds.clear();
-  updateMainActionButton();
 }
 
 async function handleApproveSelected() {

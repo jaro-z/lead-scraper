@@ -1668,7 +1668,8 @@ header h1 {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
+  padding: 0 12px;
+  height: 28px;
   border: none;
   background: transparent;
   border-radius: 6px;
@@ -1868,9 +1869,9 @@ header h1 {
 
 /* Main action in toolbar */
 .unified-toolbar .btn-main-action {
-  height: 40px;
-  padding: 0 20px;
-  font-size: 14px;
+  height: 36px;
+  padding: 0 16px;
+  font-size: 13px;
   margin-left: auto;
   min-width: auto;
 }
@@ -1933,9 +1934,9 @@ header h1 {
 }
 
 .btn-small {
-  height: 32px;
-  padding: 0 10px;
-  font-size: 12px;
+  height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 
 /* Status column */
@@ -1971,18 +1972,9 @@ header h1 {
   50% { opacity: 0.5; }
 }
 
-/* Review stage pill */
-.stage-pill[data-stage="review"] span {
-  color: #F59E0B;
-}
-
 /* Main action button states */
 .btn-main-action.enrich {
   background: linear-gradient(135deg, #8B5CF6 0%, #7C3AED 100%);
-}
-
-.btn-main-action.review {
-  background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
 }
 
 .btn-main-action.approve {

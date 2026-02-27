@@ -53,61 +53,75 @@
         </div>
       </div>
 
-      <!-- Pipeline Progress Bar -->
-      <div class="pipeline-progress" id="pipeline-progress">
-        <div class="progress-track">
-          <div class="progress-segment raw" data-stage="raw">
-            <span class="segment-fill"></span>
-          </div>
-          <div class="progress-segment qualified" data-stage="qualified">
-            <span class="segment-fill"></span>
-          </div>
-          <div class="progress-segment enriched" data-stage="enriched">
-            <span class="segment-fill"></span>
-          </div>
-          <div class="progress-segment ready" data-stage="ready">
-            <span class="segment-fill"></span>
-          </div>
+      <!-- Unified Toolbar -->
+      <div class="unified-toolbar" id="pipeline-progress">
+        <div class="stage-pills">
+          <button class="stage-pill active" data-stage="raw">Raw <span id="stat-raw">0</span></button>
+          <button class="stage-pill" data-stage="enriched">Enriched <span id="stat-enriched">0</span></button>
+          <button class="stage-pill" data-stage="qualified">Qualified <span id="stat-qualified">0</span></button>
+          <button class="stage-pill" data-stage="ready">Ready <span id="stat-ready">0</span></button>
         </div>
-        <div class="progress-labels">
-          <span class="progress-label" data-stage="raw"><strong id="stat-raw">0</strong> Raw</span>
-          <span class="progress-label" data-stage="qualified"><strong id="stat-qualified">0</strong> Qualified</span>
-          <span class="progress-label" data-stage="enriched"><strong id="stat-enriched">0</strong> Enriched</span>
-          <span class="progress-label" data-stage="ready"><strong id="stat-ready">0</strong> Ready</span>
-        </div>
-      </div>
 
-      <!-- Action Bar -->
-      <div class="action-bar">
-        <button id="main-action-btn" class="btn btn-main-action">
-          <span id="main-action-text">Process Leads</span>
-        </button>
-        <div class="action-bar-right">
-          <button id="export-btn" class="btn btn-secondary btn-icon">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+        <div class="toolbar-search">
+          <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input type="text" id="search-filter" placeholder="Search..." class="search-input-compact">
+        </div>
+
+        <div class="custom-select" id="segment-filter-wrapper">
+          <button class="custom-select-trigger" id="segment-filter-btn">
+            <span id="segment-filter-text">All</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M6 9l6 6 6-6"/>
             </svg>
-            CSV
           </button>
-          <button id="dedupe-btn" class="btn btn-notion btn-icon">
-            <img src="notion-logo.png" alt="Notion" class="notion-logo">
-            Push to Notion
-          </button>
-          <button id="delete-selected-btn" class="btn btn-danger hidden">Delete</button>
+          <div class="custom-select-dropdown hidden" id="segment-filter-dropdown">
+            <button class="custom-select-option selected" data-value="">All</button>
+            <button class="custom-select-option" data-value="saas">SaaS</button>
+            <button class="custom-select-option" data-value="agency">Agency</button>
+            <button class="custom-select-option" data-value="e-commerce">E-commerce</button>
+            <button class="custom-select-option" data-value="manufacturing">Manufacturing</button>
+            <button class="custom-select-option" data-value="services">Services</button>
+            <button class="custom-select-option" data-value="other">Other</button>
+          </div>
+          <input type="hidden" id="segment-filter" value="">
         </div>
-      </div>
 
-      <div class="filters-bar">
-        <input type="text" id="search-filter" placeholder="Search by name, city..." class="search-input">
-        <select id="segment-filter" class="filter-select">
-          <option value="">All Segments</option>
-          <option value="saas">SaaS</option>
-          <option value="agency">Agency</option>
-          <option value="e-commerce">E-commerce</option>
-          <option value="manufacturing">Manufacturing</option>
-          <option value="services">Services</option>
-          <option value="other">Other</option>
-        </select>
+        <!-- Action buttons -->
+        <button id="dedupe-btn" class="btn btn-secondary btn-small" title="Check for duplicates">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M9 12l2 2 4-4"/>
+            <circle cx="12" cy="12" r="10"/>
+          </svg>
+          Dedupe
+        </button>
+
+        <button id="push-notion-btn" class="btn btn-secondary btn-small" disabled title="Select leads first">
+          <img src="notion-logo.png" alt="" width="14" height="14">
+          Push to Notion <span id="notion-count"></span>
+        </button>
+
+        <div class="toolbar-more">
+          <button class="btn-more" id="more-menu-btn">
+            <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/>
+            </svg>
+          </button>
+          <div class="more-dropdown hidden" id="more-dropdown">
+            <button id="export-btn" class="dropdown-item">
+              <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                <path d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/>
+              </svg>
+              Export CSV
+            </button>
+            <button id="delete-selected-btn" class="dropdown-item danger hidden">Delete Selected</button>
+          </div>
+        </div>
+
+        <button id="main-action-btn" class="btn btn-main-action" disabled title="Select leads first">
+          <span id="main-action-text">Select leads to enrich</span>
+        </button>
       </div>
 
       <div id="results-table-container">
@@ -119,6 +133,7 @@
               <th class="sortable" data-sort="address">City</th>
               <th class="sortable" data-sort="website">Website</th>
               <th class="sortable" data-sort="segment">Segment</th>
+              <th class="status-col">Status</th>
               <th>Actions</th>
             </tr>
           </thead>

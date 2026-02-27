@@ -462,6 +462,7 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
       ico: data.ico || null,
       segment: data.segment || null,
       industry: data.industry || null,
+      company_description: data.description || null,
       company_size: data.size || null,
       enrichment_source: 'waterfall_full',
       ico_validated: false
@@ -1019,6 +1020,224 @@ app.post('/api/notion/export/batch', asyncHandler(async (req, res) => {
 
   notionCacheTime = null;
   res.json(results);
+}));
+
+// ============ New Pipeline Endpoints ============
+
+/**
+ * Check duplicates against both local DB and Notion
+ */
+app.post('/api/companies/dedupe', asyncHandler(async (req, res) => {
+  const { companyIds, all } = req.body;
+
+  let companiesToCheck;
+  if (all) {
+    companiesToCheck = db.getCompaniesForQualification();
+  } else if (companyIds && Array.isArray(companyIds)) {
+    companiesToCheck = companyIds.map(id => db.getCompanyById(id)).filter(Boolean);
+  } else {
+    return res.status(400).json({ error: 'Either companyIds array or all:true required' });
+  }
+
+  if (!companiesToCheck.length) {
+    return res.json({ total: 0, results: [] });
+  }
+
+  // Get Notion contacts if configured
+  let notionContacts = null;
+  let notionDomainIndex = null;
+  if (NOTION_API_KEY && NOTION_DATABASE_ID) {
+    try {
+      const notionData = await getNotionContacts(true);
+      notionContacts = notionData.contacts;
+      notionDomainIndex = notionData.domainIndex;
+    } catch (err) {
+      console.warn('Notion fetch failed, checking local only:', err.message);
+    }
+  }
+
+  const results = [];
+
+  for (const company of companiesToCheck) {
+    const result = {
+      companyId: company.id,
+      companyName: company.name,
+      companyWebsite: company.website,
+      localMatches: [],
+      notionMatches: [],
+      isDupe: false
+    };
+
+    // Check local duplicates
+    const localDupes = db.getLocalDuplicates(company.id);
+    result.localMatches = localDupes.map(d => ({
+      id: d.id,
+      name: d.name,
+      website: d.website,
+      matchType: d.matchType,
+      confidence: d.confidence
+    }));
+
+    // Check Notion duplicates
+    if (notionContacts && notionDomainIndex) {
+      const notionDupe = notion.checkDuplicate(company, notionDomainIndex, notionContacts);
+      if (notionDupe.isDupe) {
+        result.notionMatches = notionDupe.matches.map(m => ({
+          name: m.name,
+          email: m.email,
+          organizaceUrl: m.organizaceUrl,
+          matchType: notionDupe.matchType,
+          confidence: notionDupe.confidence
+        }));
+      }
+    }
+
+    result.isDupe = result.localMatches.length > 0 || result.notionMatches.length > 0;
+    results.push(result);
+  }
+
+  const dupeCount = results.filter(r => r.isDupe).length;
+  res.json({
+    total: results.length,
+    duplicates: dupeCount,
+    unique: results.length - dupeCount,
+    results
+  });
+}));
+
+/**
+ * Bulk push companies to Notion (with progress tracking)
+ */
+app.post('/api/companies/push-to-notion', asyncHandler(async (req, res) => {
+  if (!requireNotionConfig(res)) return;
+
+  const { companyIds } = req.body;
+  if (!companyIds || !Array.isArray(companyIds) || !companyIds.length) {
+    return res.status(400).json({ error: 'companyIds array required' });
+  }
+
+  const client = new notion.NotionClient(NOTION_API_KEY);
+  const results = { pushed: 0, skipped: 0, errors: [], pages: [] };
+
+  for (const id of companyIds) {
+    const company = db.getCompanyById(id);
+    if (!company) {
+      results.errors.push({ companyId: id, error: 'Not found' });
+      continue;
+    }
+
+    if (company.in_notion) {
+      results.skipped++;
+      continue;
+    }
+
+    try {
+      const properties = notion.formatLeadForNotion(company);
+      const page = await client.createPage(NOTION_DATABASE_ID, properties);
+
+      // Mark as in Notion
+      db.markInNotion(company.id);
+
+      results.pages.push({
+        companyId: company.id,
+        companyName: company.name,
+        notionPageId: page.id,
+        notionUrl: page.url
+      });
+      results.pushed++;
+
+      await sleep(300); // Rate limit
+    } catch (err) {
+      results.errors.push({ companyId: company.id, companyName: company.name, error: err.message });
+    }
+  }
+
+  notionCacheTime = null; // Invalidate cache
+  res.json(results);
+}));
+
+/**
+ * Approve companies from review stage to qualified
+ */
+app.post('/api/companies/:id/approve', asyncHandler(async (req, res) => {
+  const id = validateId(req.params.id);
+  const company = getCompanyOrFail(id, res);
+  if (!company) return;
+
+  const { segment, description } = req.body;
+
+  // Optionally update segment and description
+  if (segment || description) {
+    const updates = {};
+    if (segment) updates.segment = segment;
+    if (description) updates.company_description = description;
+    db.updateCompanyEnrichment(company.id, updates);
+  }
+
+  // Move to qualified stage
+  db.updatePipelineStage(company.id, 'qualified');
+
+  res.json({
+    success: true,
+    company_id: company.id,
+    stage: 'qualified'
+  });
+}));
+
+/**
+ * Bulk approve companies to qualified stage
+ */
+app.post('/api/companies/approve', asyncHandler(async (req, res) => {
+  const { companyIds } = req.body;
+  if (!companyIds || !Array.isArray(companyIds)) {
+    return res.status(400).json({ error: 'companyIds array required' });
+  }
+
+  const results = { approved: 0, errors: [] };
+
+  for (const id of companyIds) {
+    try {
+      db.updatePipelineStage(id, 'qualified');
+      results.approved++;
+    } catch (err) {
+      results.errors.push({ companyId: id, error: err.message });
+    }
+  }
+
+  res.json(results);
+}));
+
+/**
+ * Get distinct segments for filtering
+ */
+app.get('/api/segments', asyncHandler(async (req, res) => {
+  const segments = db.getDistinctSegments();
+  res.json(segments);
+}));
+
+/**
+ * Update company fields (segment, description)
+ */
+app.put('/api/companies/:id', asyncHandler(async (req, res) => {
+  const id = validateId(req.params.id);
+  const company = getCompanyOrFail(id, res);
+  if (!company) return;
+
+  const { segment, company_description, pipeline_stage } = req.body;
+  const updates = {};
+
+  if (segment !== undefined) updates.segment = segment;
+  if (company_description !== undefined) updates.company_description = company_description;
+
+  if (Object.keys(updates).length > 0) {
+    db.updateCompanyEnrichment(company.id, updates);
+  }
+
+  if (pipeline_stage) {
+    db.updatePipelineStage(company.id, pipeline_stage);
+  }
+
+  res.json({ success: true, company_id: company.id });
 }));
 
 // Start server

@@ -18,8 +18,7 @@ const { safeString, safeArray } = require('../utils');
 // Initialize Anthropic client (uses ANTHROPIC_API_KEY env var)
 const anthropic = new Anthropic();
 
-// Valid segment values for categorization
-const VALID_SEGMENTS = ['SaaS', 'Agency', 'E-commerce', 'Manufacturing', 'Services', 'Other'];
+// Valid size values
 const VALID_SIZES = ['small', 'medium', 'large'];
 
 /**
@@ -29,8 +28,9 @@ const VALID_SIZES = ['small', 'medium', 'large'];
 function createDefaultResult() {
   return {
     ico: null,
-    segment: 'Other',
+    segment: null,
     industry: null,
+    description: null,
     size: 'small',
     services: [],
     ico_validated: false,
@@ -79,21 +79,14 @@ async function enrichCompany(domain) {
 
 Extract the following:
 1. IČO (Czech company registration number) - exactly 8 digits, often shown in footer or contact page
-2. Segment - classify as one of: SaaS, Agency, E-commerce, Manufacturing, Services, Other
+2. Segment - be SPECIFIC and GRANULAR. Examples: "SEO Agency", "PPC Agency", "Web Development Agency", "B2B SaaS CRM", "E-commerce Fashion", "Legal Services", "Accounting Firm". Never use generic terms like just "Agency" or "SaaS".
 3. Industry - specific industry (e.g., "Digital Marketing", "Software Development", "Food Production")
-4. Size - estimate based on team size or company presence: small (<10 employees), medium (10-50), large (50+)
-5. Services - list of main services or products offered (max 5 items)
-
-Guidelines for segment classification:
-- SaaS: Software products, subscription services, online tools
-- Agency: Marketing, design, PR, recruitment agencies
-- E-commerce: Online shops, retail
-- Manufacturing: Physical product production, factories
-- Services: Consulting, legal, accounting, other professional services
-- Other: Everything else
+4. Description - ONE sentence (max 15 words) describing what this company does. Example: "B2B SaaS platform for restaurant inventory management"
+5. Size - estimate based on team size or company presence: small (<10 employees), medium (10-50), large (50+)
+6. Services - list of main services or products offered (max 5 items)
 
 Return ONLY valid JSON in this exact format, no other text:
-{"ico": "12345678", "segment": "Agency", "industry": "Digital Marketing", "size": "small", "services": ["PPC advertising", "SEO", "Social media"]}
+{"ico": "12345678", "segment": "SEO Agency", "industry": "Digital Marketing", "description": "Full-service SEO agency specializing in e-commerce and SaaS clients", "size": "small", "services": ["Technical SEO", "Content strategy", "Link building"]}
 
 If IČO is not found, use null for ico field.
 
@@ -122,9 +115,9 @@ ${truncatedHtml}`
       }
     }
 
-    // Validate and apply segment (safe extraction)
-    const segmentValue = safeString(claudeData.segment, 50);
-    if (segmentValue && VALID_SEGMENTS.includes(segmentValue)) {
+    // Apply segment (freeform, no validation - allow granular values)
+    const segmentValue = safeString(claudeData.segment, 100);
+    if (segmentValue) {
       result.segment = segmentValue;
     }
 
@@ -132,6 +125,12 @@ ${truncatedHtml}`
     const industryValue = safeString(claudeData.industry, 200);
     if (industryValue) {
       result.industry = industryValue;
+    }
+
+    // Apply description (one-sentence summary)
+    const descriptionValue = safeString(claudeData.description, 300);
+    if (descriptionValue) {
+      result.description = descriptionValue;
     }
 
     // Validate and apply size
@@ -214,6 +213,5 @@ module.exports = {
   enrichCompany,
   enrichCompaniesBatch,
   createDefaultResult,
-  VALID_SEGMENTS,
   VALID_SIZES
 };

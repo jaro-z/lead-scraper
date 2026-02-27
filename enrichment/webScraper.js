@@ -2,13 +2,19 @@
  * Web Scraper for Team/Contact Pages
  * PRD-WATERFALL-ENRICHMENT: Step 2 - Contact Discovery (FREE method)
  *
- * Uses Claude API to intelligently extract contact information from company websites.
- * Tries common team/about page patterns before falling back to paid APIs.
+ * Uses Firecrawl for JS-rendered scraping and Claude API for intelligent extraction.
+ * Firecrawl handles JavaScript rendering, proxy rotation, and anti-bot bypassing.
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
+const FirecrawlApp = require('@mendable/firecrawl-js').default;
 const { validateEmail, validatePhone } = require('./validators');
 const { sanitizeContactField } = require('../utils');
+
+// Initialize Firecrawl (uses FIRECRAWL_API_KEY env var)
+const firecrawl = new FirecrawlApp({
+  apiKey: process.env.FIRECRAWL_API_KEY
+});
 
 // Initialize Anthropic client (uses ANTHROPIC_API_KEY env var)
 const anthropic = new Anthropic();
@@ -22,200 +28,121 @@ const GENERIC_EMAIL_PREFIXES = [
   'sales@', 'hello@', 'obchod@', 'noreply@'
 ];
 
-// File extensions and paths to skip when discovering URLs
-const SKIP_EXTENSIONS = /\.(pdf|jpg|jpeg|png|gif|svg|webp|ico|css|js|woff|woff2|ttf|eot|xml|json|zip|rar)$/i;
-const SKIP_PATHS = /\/(wp-content|wp-includes|assets|static|media|images|css|js)\//i;
 
 /**
- * Fetch a web page with proper headers to avoid blocking
- * @param {string} url - Full URL to fetch
- * @param {number} timeout - Request timeout in ms (default: 10000)
- * @returns {Promise<string>} - HTML content
+ * Map all URLs on a domain using Firecrawl /map endpoint (fast, 1 credit)
+ * @param {string} domain - Domain to map (e.g., "company.cz")
+ * @returns {Promise<string[]>} - Array of discovered URLs
  */
-async function fetchPage(url, timeout = 10000) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
+async function mapDomain(domain) {
+  console.log(`[Firecrawl] Mapping domain: ${domain}`);
 
   try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'cs,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
-      },
-      redirect: 'follow'
+    const result = await firecrawl.mapUrl(`https://${domain}`, {
+      limit: 100 // Limit to 100 URLs for efficiency
     });
 
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    if (!result.success) {
+      throw new Error(result.error || 'Firecrawl map failed');
     }
 
-    return await response.text();
+    const urls = result.links || [];
+    console.log(`[Firecrawl] Mapped ${urls.length} URLs from ${domain}`);
+    return urls;
   } catch (error) {
-    clearTimeout(timeoutId);
-    if (error.name === 'AbortError') {
-      throw new Error(`Request timeout after ${timeout}ms`);
-    }
-    throw error;
+    console.error(`[Firecrawl] Map error: ${error.message}`);
+    return [];
   }
 }
 
 /**
- * Check if href should be skipped (non-page links, assets)
- * @param {string} href - The href value to check
- * @returns {boolean} True if should skip
+ * Fetch a web page using Firecrawl (with JS rendering)
+ * Firecrawl handles: JavaScript execution, proxy rotation, anti-bot bypassing
+ * @param {string} url - Full URL to fetch
+ * @param {number} timeout - Request timeout in ms (default: 30000)
+ * @returns {Promise<string>} - HTML content
  */
-function shouldSkipHref(href) {
-  return href.startsWith('mailto:') ||
-         href.startsWith('tel:') ||
-         href.startsWith('javascript:') ||
-         SKIP_EXTENSIONS.test(href) ||
-         SKIP_PATHS.test(href);
-}
+async function fetchPage(url, timeout = 30000) {
+  console.log(`[Firecrawl] Scraping: ${url}`);
 
-/**
- * Check if href is same domain (handles www variants)
- * @param {string} href - Full URL to check
- * @param {string} domain - Base domain
- * @returns {boolean} True if same domain
- */
-function isSameDomain(href, domain) {
-  try {
-    const hrefDomain = new URL(href).hostname.replace(/^www\./, '');
-    const baseDomain = domain.replace(/^www\./, '');
-    return hrefDomain === baseDomain;
-  } catch {
-    return false;
-  }
-}
+  const result = await firecrawl.scrapeUrl(url, {
+    formats: ['html'],
+    waitFor: 3000, // Wait 3s for JS to render
+    timeout: timeout
+  });
 
-/**
- * Discover ALL internal URLs from homepage HTML
- * @param {string} html - Homepage HTML content
- * @param {string} domain - Base domain (e.g., "company.cz")
- * @returns {string[]} - Array of unique internal URLs (full URLs)
- */
-function discoverAllInternalUrls(html, domain) {
-  const urls = new Set();
-  const baseUrl = `https://${domain}`;
-  const hrefRegex = /href=["']([^"'#]+)["']/gi;
-
-  let match;
-  while ((match = hrefRegex.exec(html)) !== null) {
-    const href = match[1];
-
-    if (shouldSkipHref(href)) continue;
-
-    let fullUrl;
-    if (href.startsWith('http')) {
-      if (isSameDomain(href, domain)) {
-        fullUrl = href;
-      }
-    } else if (href.startsWith('/')) {
-      fullUrl = baseUrl + href;
-    }
-
-    if (fullUrl) {
-      const normalized = fullUrl.split('?')[0].replace(/\/$/, '');
-      urls.add(normalized);
-    }
+  if (!result.success) {
+    throw new Error(result.error || 'Firecrawl scrape failed');
   }
 
-  return Array.from(urls);
+  console.log(`[Firecrawl] Success: ${url}`);
+  return result.html || '';
 }
 
+
 /**
- * Use AI to categorize and select the ONE best page to scrape
- * Priority: TEAM > CONTACT > ABOUT
+ * Use AI to rank the TOP 3 best pages to scrape for contacts
+ * Priority: TEAM > ABOUT > CONTACT
  * @param {string[]} urls - Array of discovered URLs
- * @param {string} html - Original homepage HTML (for link text extraction)
- * @returns {Promise<{url: string, category: string} | null>}
+ * @returns {Promise<Array<{url: string, category: string}>>} - Ranked list of up to 3 pages
  */
-async function categorizeAndSelectBestPage(urls, html) {
-  if (urls.length === 0) return null;
+async function rankBestPages(urls) {
+  if (urls.length === 0) return [];
 
-  // Build href -> link text map from HTML for context
-  const linkTextMap = new Map();
-  const linkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi;
-  let match;
-  while ((match = linkRegex.exec(html)) !== null) {
-    const href = match[1];
-    const text = match[2].trim();
-    if (text && text.length < 100) {
-      linkTextMap.set(href, text);
-    }
-  }
-
-  // Build URL list with link text context
-  const urlsWithContext = urls.map(url => {
-    const path = new URL(url).pathname;
-    // Find matching link text
-    let linkText = null;
-    for (const [href, text] of linkTextMap.entries()) {
-      if (url.endsWith(href) || href === path || url.includes(href)) {
-        linkText = text;
-        break;
-      }
-    }
-    return linkText ? `${url} (link text: "${linkText}")` : url;
-  }).join('\n');
+  // Limit URLs to avoid token overflow
+  const urlList = urls.slice(0, 50).join('\n');
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 256,
+      max_tokens: 512,
       messages: [{
         role: 'user',
-        content: `Select the BEST page to find team/employee contact info.
+        content: `Rank the TOP 3 pages most likely to contain team member contact info (names, emails, phones).
 
-PRIORITY (pick highest available):
-1. TEAM - pages listing team members, employees, leadership, staff
-2. CONTACT - contact pages with people's info (not just forms)
-3. ABOUT - about us pages that might show founders/team
+PRIORITY ORDER:
+1. TEAM - pages listing team members, employees, leadership, staff, founders
+2. ABOUT - about us pages that might show founders/team
+3. CONTACT - contact pages with people's info (not just forms)
 
 URLs discovered on this company website:
-${urlsWithContext}
+${urlList}
 
 Rules:
-- Pick ONE URL most likely to have individual people with emails
-- Consider URL path AND link text
-- Any language (Czech: tým=team, lidé=people, vedení=leadership, kontakt=contact, o nás=about)
-- Ignore: homepage, services, products, blog, careers/jobs, legal pages
+- Rank by likelihood of having INDIVIDUAL people with emails/phones
+- Consider URL path keywords in any language
+- Czech: tým=team, lidé=people, vedení=leadership, o-nas/o-nás=about, kontakt=contact
+- IGNORE: homepage (/), services, products, blog, careers/jobs, legal, privacy, terms
 
-Return ONLY valid JSON (no markdown):
-{"url": "https://...", "category": "TEAM|CONTACT|ABOUT"}
+Return ONLY valid JSON array (no markdown), max 3 items:
+[{"url": "https://...", "category": "TEAM|ABOUT|CONTACT"}, ...]
 
-If NO page fits these categories, return:
-{"url": null, "category": null}`
+If NO pages fit, return: []`
       }]
     });
 
     const responseText = response.content[0].text.trim();
 
     // Parse JSON response
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
-      console.warn('[WebScraper] No JSON in AI response for page selection');
-      return null;
+      console.warn('[WebScraper] No JSON array in AI response for page ranking');
+      return [];
     }
 
-    const result = JSON.parse(jsonMatch[0]);
+    const ranked = JSON.parse(jsonMatch[0]);
 
-    if (result.url && result.category) {
-      console.log(`[WebScraper] AI selected ${result.category} page: ${result.url}`);
-      return { url: result.url, category: result.category };
-    }
+    // Filter valid entries and limit to 3
+    const validRanked = ranked
+      .filter(r => r.url && r.category)
+      .slice(0, 3);
 
-    return null;
+    console.log(`[WebScraper] AI ranked ${validRanked.length} pages:`, validRanked.map(r => `${r.category}: ${r.url}`));
+    return validRanked;
+
   } catch (error) {
-    console.error('[WebScraper] AI page selection error:', error.message);
-    return null;
+    console.error('[WebScraper] AI page ranking error:', error.message);
+    return [];
   }
 }
 
@@ -256,7 +183,7 @@ async function extractContactsWithClaude(html) {
 
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-haiku-4-5-20251001', // Using Haiku for cost savings (~12x cheaper than Sonnet)
       max_tokens: 2048,
       messages: [{
         role: 'user',
@@ -437,62 +364,95 @@ function deduplicateContacts(contacts) {
 }
 
 /**
- * Main function: Scrape contacts from a domain (efficient single-page approach)
- * Discovers URLs from homepage, selects ONE best page (Team > Contact > About),
- * and sends only that page to Claude API.
+ * Check if contacts have usable contact info (email or phone)
+ * @param {Array} contacts - Array of contact objects
+ * @returns {boolean} True if at least one contact has email or phone
+ */
+function hasUsableContacts(contacts) {
+  return contacts.some(c => c.email || c.phone);
+}
+
+/**
+ * Main function: Scrape contacts from a domain with retry loop
+ * Uses Firecrawl /map to discover URLs, ranks top 3 pages, and tries each
+ * until contacts with email/phone are found.
  *
  * @param {string} domain - Company domain (e.g., "ppcone.cz")
  * @param {Object} options - Scraping options
  * @param {boolean} options.validateResults - Whether to validate emails/phones (default: true)
+ * @param {number} options.maxAttempts - Max pages to try before giving up (default: 3)
  * @returns {Promise<Array<{name: string, role: string, email: string, phone: string, email_valid?: boolean, phone_valid?: boolean}>>}
  */
 async function scrapeTeamPages(domain, options = {}) {
-  const { validateResults = true } = options;
+  const { validateResults = true, maxAttempts = 3 } = options;
 
   console.log(`[WebScraper] Starting scrape for: ${domain}`);
 
-  // Step 1: Fetch homepage
-  let homepage;
-  try {
-    homepage = await fetchPage(`https://${domain}`);
-  } catch (error) {
-    console.warn(`[WebScraper] Could not fetch homepage: ${error.message}`);
+  // Step 1: Use /map to discover all URLs (1 credit, fast)
+  const allUrls = await mapDomain(domain);
+
+  if (allUrls.length === 0) {
+    console.warn(`[WebScraper] No URLs found for ${domain}`);
     return [];
   }
 
-  // Step 2: Discover ALL internal URLs from homepage (no guessing!)
-  const allUrls = discoverAllInternalUrls(homepage, domain);
-  console.log(`[WebScraper] Discovered ${allUrls.length} internal URLs`);
+  // Step 2: Use AI to rank top 3 pages (Team > About > Contact)
+  const rankedPages = await rankBestPages(allUrls);
 
-  // Step 3: Use AI to select ONE best page (priority: Team > Contact > About)
-  const bestPage = await categorizeAndSelectBestPage(allUrls, homepage);
-
-  let htmlToScrape = homepage;
-  let pageSource = 'homepage';
-
-  if (bestPage) {
-    console.log(`[WebScraper] Selected ${bestPage.category} page: ${bestPage.url}`);
-    try {
-      htmlToScrape = await fetchPage(bestPage.url);
-      pageSource = bestPage.category;
-    } catch (error) {
-      console.warn(`[WebScraper] Could not fetch ${bestPage.url}, using homepage`);
-      // Fall back to homepage
-    }
-  } else {
-    console.log(`[WebScraper] No team/contact/about pages found, using homepage only`);
+  if (rankedPages.length === 0) {
+    console.warn(`[WebScraper] No relevant pages found for ${domain}`);
+    return [];
   }
 
-  // Step 4: Extract contacts (SINGLE Claude API call - saves ~90% tokens)
-  let contacts = await extractContactsWithClaude(htmlToScrape);
-  contacts = verifyAndAddMissedContacts(contacts, htmlToScrape);
+  // Step 3: Try each ranked page until we find contacts with email/phone
+  let allContacts = [];
+  let successfulPage = null;
 
-  const uniqueContacts = deduplicateContacts(contacts);
-  console.log(`[WebScraper] Found ${uniqueContacts.length} unique contacts from ${pageSource}`);
+  for (let i = 0; i < Math.min(rankedPages.length, maxAttempts); i++) {
+    const page = rankedPages[i];
+    console.log(`[WebScraper] Attempt ${i + 1}/${rankedPages.length}: Trying ${page.category} page: ${page.url}`);
 
-  // Step 5: Optional validation
+    try {
+      // Scrape the page (1 credit per page)
+      const html = await fetchPage(page.url);
+
+      // Extract contacts
+      let contacts = await extractContactsWithClaude(html);
+      contacts = verifyAndAddMissedContacts(contacts, html);
+      const uniqueContacts = deduplicateContacts(contacts);
+
+      console.log(`[WebScraper] Found ${uniqueContacts.length} contacts from ${page.category} page`);
+
+      // Check if we found usable contacts (with email or phone)
+      if (hasUsableContacts(uniqueContacts)) {
+        console.log(`[WebScraper] Success! Found contacts with email/phone on ${page.category} page`);
+        allContacts = uniqueContacts;
+        successfulPage = page;
+        break; // Stop trying more pages
+      } else {
+        console.log(`[WebScraper] No email/phone found on ${page.category} page, trying next...`);
+        // Keep contacts in case we need them as fallback
+        if (uniqueContacts.length > allContacts.length) {
+          allContacts = uniqueContacts;
+        }
+      }
+    } catch (error) {
+      console.warn(`[WebScraper] Could not fetch ${page.url}: ${error.message}`);
+      continue;
+    }
+  }
+
+  if (successfulPage) {
+    console.log(`[WebScraper] Final: ${allContacts.length} contacts from ${successfulPage.category} page`);
+  } else if (allContacts.length > 0) {
+    console.log(`[WebScraper] Fallback: ${allContacts.length} contacts (no email/phone found)`);
+  } else {
+    console.log(`[WebScraper] No contacts found after ${maxAttempts} attempts`);
+  }
+
+  // Step 4: Optional validation
   if (validateResults) {
-    for (const contact of uniqueContacts) {
+    for (const contact of allContacts) {
       if (contact.email) {
         const emailResult = await validateEmail(contact.email);
         contact.email_valid = emailResult.valid;
@@ -507,18 +467,18 @@ async function scrapeTeamPages(domain, options = {}) {
     }
   }
 
-  return uniqueContacts;
+  return allContacts;
 }
 
 module.exports = {
   // Core functions
+  mapDomain,
   fetchPage,
   cleanHtml,
   scrapeTeamPages,
 
-  // URL discovery
-  discoverAllInternalUrls,
-  categorizeAndSelectBestPage,
+  // URL discovery & ranking
+  rankBestPages,
 
   // Contact extraction
   extractContactsWithClaude,
@@ -526,6 +486,7 @@ module.exports = {
   verifyAndAddMissedContacts,
   deduplicateContacts,
   guessNameFromEmail,
+  hasUsableContacts,
 
   // Utilities
   isGenericEmail,
