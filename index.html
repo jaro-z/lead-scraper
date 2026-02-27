@@ -362,6 +362,23 @@ NOTION_DATABASE_ID=your_database_id</pre>
   <!-- Enrich backdrop -->
   <div id="enrich-backdrop" class="enrich-backdrop hidden"></div>
 
+  <!-- Stage Context Menu -->
+  <div id="stage-context-menu" class="context-menu hidden">
+    <div class="context-menu-header">Move to Stage</div>
+    <button class="context-menu-item" data-stage="raw">
+      <span class="stage-dot raw"></span> Raw
+    </button>
+    <button class="context-menu-item" data-stage="enriched">
+      <span class="stage-dot enriched"></span> Enriched
+    </button>
+    <button class="context-menu-item" data-stage="qualified">
+      <span class="stage-dot qualified"></span> Qualified
+    </button>
+    <button class="context-menu-item" data-stage="ready">
+      <span class="stage-dot ready"></span> Ready
+    </button>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

@@ -150,6 +150,105 @@ function closeSegmentDropdownOnClickOutside(e) {
   }
 }
 
+// ============ Context Menu for Stage Movement ============
+
+const stageContextMenu = document.getElementById('stage-context-menu');
+let contextMenuTargetId = null;
+
+// Close context menu when clicking elsewhere
+document.addEventListener('click', (e) => {
+  if (stageContextMenu && !stageContextMenu.contains(e.target)) {
+    hideContextMenu();
+  }
+});
+
+// Close on escape key
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    hideContextMenu();
+  }
+});
+
+function showContextMenu(e, companyId) {
+  e.preventDefault();
+  contextMenuTargetId = companyId;
+
+  const company = companies.find(c => c.id === companyId);
+  const currentStage = company?.pipeline_stage || 'raw';
+
+  // Update current stage indicator
+  stageContextMenu.querySelectorAll('.context-menu-item').forEach(item => {
+    item.classList.toggle('current', item.dataset.stage === currentStage);
+  });
+
+  // Position menu at cursor
+  stageContextMenu.style.left = `${e.clientX}px`;
+  stageContextMenu.style.top = `${e.clientY}px`;
+  stageContextMenu.classList.remove('hidden');
+
+  // Ensure menu stays within viewport
+  const rect = stageContextMenu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) {
+    stageContextMenu.style.left = `${window.innerWidth - rect.width - 10}px`;
+  }
+  if (rect.bottom > window.innerHeight) {
+    stageContextMenu.style.top = `${window.innerHeight - rect.height - 10}px`;
+  }
+}
+
+function hideContextMenu() {
+  if (stageContextMenu) {
+    stageContextMenu.classList.add('hidden');
+  }
+  contextMenuTargetId = null;
+}
+
+async function handleStageChange(newStage) {
+  if (!contextMenuTargetId) return;
+
+  const companyId = contextMenuTargetId;
+  hideContextMenu();
+
+  try {
+    setRowStatus(companyId, 'Moving...', 'processing');
+
+    const res = await fetch(`/api/companies/${companyId}/stage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: newStage })
+    });
+
+    if (res.ok) {
+      setRowStatus(companyId, formatStageStatus(newStage), 'done');
+      // Update local data
+      const company = companies.find(c => c.id === companyId);
+      if (company) {
+        company.pipeline_stage = newStage;
+      }
+      // Refresh stats
+      await updatePipelineStats();
+      // Re-render if filtered by stage
+      if (activeStageFilter) {
+        applyFilters();
+      }
+    } else {
+      const err = await res.json();
+      setRowStatus(companyId, 'Error', 'error');
+      console.error('Failed to change stage:', err.error);
+    }
+  } catch (err) {
+    setRowStatus(companyId, 'Error', 'error');
+    console.error('Failed to change stage:', err.message);
+  }
+}
+
+// Setup context menu item click handlers
+if (stageContextMenu) {
+  stageContextMenu.querySelectorAll('.context-menu-item').forEach(item => {
+    item.addEventListener('click', () => handleStageChange(item.dataset.stage));
+  });
+}
+
 // ============ API Calls ============
 
 async function loadApiUsage() {
@@ -305,6 +404,14 @@ function renderCompanies() {
       e.stopPropagation();
       const id = parseInt(btn.closest('tr').dataset.id);
       showDetails(id);
+    });
+  });
+
+  // Right-click context menu for stage changes
+  resultsBody.querySelectorAll('tr').forEach(row => {
+    row.addEventListener('contextmenu', (e) => {
+      const id = parseInt(row.dataset.id);
+      if (id) showContextMenu(e, id);
     });
   });
 }

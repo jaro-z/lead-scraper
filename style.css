@@ -1996,3 +1996,68 @@ header h1 {
 #notion-count {
   font-weight: 600;
 }
+
+/* ============ Context Menu for Stage Movement ============ */
+
+.context-menu {
+  position: fixed;
+  background: white;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 1002;
+  min-width: 160px;
+  overflow: hidden;
+}
+
+.context-menu.hidden {
+  display: none;
+}
+
+.context-menu-header {
+  padding: 10px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6B7280;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: #F9FAFB;
+  border-bottom: 1px solid #E5E7EB;
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: none;
+  font-size: 13px;
+  color: #374151;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s ease;
+}
+
+.context-menu-item:hover {
+  background: #F3F4F6;
+}
+
+.context-menu-item.current {
+  background: #F0FDF4;
+  color: #059669;
+  font-weight: 500;
+}
+
+.stage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.stage-dot.raw { background: #9CA3AF; }
+.stage-dot.enriched { background: #8B5CF6; }
+.stage-dot.qualified { background: #10B981; }
+.stage-dot.ready { background: #3B82F6; }
