@@ -24,11 +24,18 @@ const DEFAULT_CONFIDENCE = {
  * @param {number|string} companyId - Company ID in database
  * @param {string} domain - Company domain (e.g., 'example.cz')
  * @param {string} hunterApiKey - Hunter.io API key for paid fallback
- * @returns {Promise<{source: 'web_scrape'|'hunter'|null, contacts: Array}>}
+ * @returns {Promise<{source: 'web_scrape'|'hunter'|null, contacts: Array, log: Object}>}
  */
 async function discoverContacts(companyId, domain, hunterApiKey) {
+  // Initialize combined log
+  const log = {
+    source: null,
+    webScrape: null,
+    hunter: null
+  };
+
   if (!domain) {
-    return { source: null, contacts: [], error: 'No domain provided' };
+    return { source: null, contacts: [], companyId, log, error: 'No domain provided' };
   }
 
   // Clean domain (remove protocol, www, trailing slashes)
@@ -39,18 +46,23 @@ async function discoverContacts(companyId, domain, hunterApiKey) {
 
   // Step 1: Try web scraping (FREE)
   try {
-    const scrapedContacts = await webScraper.scrapeTeamPages(cleanDomain);
+    const scrapeResult = await webScraper.scrapeTeamPages(cleanDomain, { returnLog: true });
+    const scrapedContacts = scrapeResult.contacts || [];
+    log.webScrape = scrapeResult.log;
 
     if (scrapedContacts && scrapedContacts.length > 0) {
       console.log(`[Waterfall] Found ${scrapedContacts.length} contacts via web scrape for ${cleanDomain}`);
+      log.source = 'web_scrape';
       return {
         source: 'web_scrape',
         contacts: normalizeContacts(scrapedContacts, 'web_scrape'),
-        companyId
+        companyId,
+        log
       };
     }
   } catch (error) {
     console.warn(`[Waterfall] Web scraping failed for ${cleanDomain}:`, error.message);
+    log.webScrape = { error: error.message };
     // Continue to fallback
   }
 
@@ -59,26 +71,31 @@ async function discoverContacts(companyId, domain, hunterApiKey) {
     try {
       const hunterResult = await hunter.domainSearch(cleanDomain, hunterApiKey);
       const hunterContacts = hunterResult.emails || [];
+      log.hunter = { contacted: true, found: hunterContacts.length };
 
       if (hunterContacts.length > 0) {
         console.log(`[Waterfall] Found ${hunterContacts.length} contacts via Hunter.io for ${cleanDomain}`);
+        log.source = 'hunter';
         return {
           source: 'hunter',
           contacts: normalizeContacts(hunterContacts, 'hunter'),
           companyId,
-          organization: hunterResult.organization
+          organization: hunterResult.organization,
+          log
         };
       }
     } catch (error) {
       console.warn(`[Waterfall] Hunter.io failed for ${cleanDomain}:`, error.message);
+      log.hunter = { error: error.message };
     }
   } else {
     console.log(`[Waterfall] No Hunter API key provided, skipping paid fallback for ${cleanDomain}`);
+    log.hunter = { skipped: true, reason: 'no_api_key' };
   }
 
   // No contacts found
   console.log(`[Waterfall] No contacts found for ${cleanDomain}`);
-  return { source: null, contacts: [], companyId };
+  return { source: null, contacts: [], companyId, log };
 }
 
 /**

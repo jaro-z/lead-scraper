@@ -57,6 +57,7 @@
       <div class="unified-toolbar" id="pipeline-progress">
         <div class="stage-pills">
           <button class="stage-pill active" data-stage="raw">Raw <span id="stat-raw">0</span></button>
+          <button class="stage-pill" data-stage="no_website">No Website <span id="stat-no_website">0</span></button>
           <button class="stage-pill" data-stage="enriched">Enriched <span id="stat-enriched">0</span></button>
           <button class="stage-pill" data-stage="qualified">Qualified <span id="stat-qualified">0</span></button>
           <button class="stage-pill" data-stage="ready">Ready <span id="stat-ready">0</span></button>
@@ -377,6 +378,55 @@ NOTION_DATABASE_ID=your_database_id</pre>
     <button class="context-menu-item" data-stage="ready">
       <span class="stage-dot ready"></span> Ready
     </button>
+  </div>
+
+  <!-- Edit Contact Modal -->
+  <div id="edit-contact-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Edit Contact</h2>
+      <form id="edit-contact-form">
+        <input type="hidden" id="edit-contact-id">
+        <input type="hidden" id="edit-contact-company-id">
+
+        <div class="form-group">
+          <label for="edit-contact-email">Email *</label>
+          <input type="email" id="edit-contact-email" required>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="edit-contact-first-name">First Name</label>
+            <input type="text" id="edit-contact-first-name">
+          </div>
+          <div class="form-group">
+            <label for="edit-contact-last-name">Last Name</label>
+            <input type="text" id="edit-contact-last-name">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="edit-contact-title">Title / Role</label>
+          <input type="text" id="edit-contact-title" placeholder="e.g., CEO, Marketing Director">
+        </div>
+
+        <div class="form-group">
+          <label for="edit-contact-phone">Phone</label>
+          <input type="tel" id="edit-contact-phone" placeholder="+420 xxx xxx xxx">
+        </div>
+
+        <div class="form-group checkbox-group">
+          <label>
+            <input type="checkbox" id="edit-contact-primary">
+            Set as primary contact
+          </label>
+        </div>
+
+        <div class="form-actions">
+          <button type="button" id="cancel-edit-contact" class="btn btn-secondary">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Changes</button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <script src="app.js"></script>

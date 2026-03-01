@@ -108,6 +108,10 @@ addColumnIfMissing('companies', 'pipeline_stage', "TEXT DEFAULT 'raw'");
 addColumnIfMissing('companies', 'in_notion', 'INTEGER DEFAULT 0');
 addColumnIfMissing('companies', 'qualified_at', 'DATETIME');
 
+// Enrichment log - stores JSON with URLs discovered, pages scraped, contacts parsed
+addColumnIfMissing('companies', 'enrichment_log', 'TEXT');
+addColumnIfMissing('companies', 'enrichment_error', 'TEXT');
+
 // Migration: Remove 'review' stage - move to 'enriched'
 db.exec(`UPDATE companies SET pipeline_stage = 'enriched' WHERE pipeline_stage = 'review'`);
 
@@ -398,6 +402,61 @@ function getContactById(id) {
   return db.prepare(`SELECT * FROM contacts WHERE id = ?`).get(id);
 }
 
+/**
+ * Delete a contact and update company contacts_count
+ * @param {number} contactId - Contact ID
+ * @returns {number|null} Company ID or null if contact not found
+ */
+function deleteContact(contactId) {
+  const contact = db.prepare(`SELECT company_id FROM contacts WHERE id = ?`).get(contactId);
+  if (!contact) return null;
+
+  db.prepare(`DELETE FROM contacts WHERE id = ?`).run(contactId);
+
+  // Update company contacts_count
+  const count = db.prepare(`SELECT COUNT(*) as cnt FROM contacts WHERE company_id = ?`)
+    .get(contact.company_id).cnt;
+  db.prepare(`UPDATE companies SET contacts_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+    .run(count, contact.company_id);
+
+  return contact.company_id;
+}
+
+/**
+ * Update contact fields
+ * @param {number} contactId - Contact ID
+ * @param {Object} data - Fields to update
+ * @returns {Object|null} Updated contact or null
+ */
+function updateContact(contactId, data) {
+  const allowedFields = ['email', 'first_name', 'last_name', 'full_name', 'title', 'phone', 'is_primary'];
+  const filteredData = {};
+
+  for (const key of allowedFields) {
+    if (data[key] !== undefined) {
+      filteredData[key] = data[key];
+    }
+  }
+
+  const query = buildUpdateQuery('contacts', filteredData);
+  if (!query) return null;
+
+  db.prepare(query.sql).run(...query.values, contactId);
+  return getContactById(contactId);
+}
+
+/**
+ * Set primary contact for a company (clears existing primary)
+ * @param {number} companyId - Company ID
+ * @param {number} contactId - Contact ID to set as primary
+ */
+function setPrimaryContact(companyId, contactId) {
+  // Clear existing primary flag for this company
+  db.prepare(`UPDATE contacts SET is_primary = 0 WHERE company_id = ?`).run(companyId);
+  // Set new primary
+  db.prepare(`UPDATE contacts SET is_primary = 1 WHERE id = ? AND company_id = ?`).run(contactId, companyId);
+}
+
 // ============ Pipeline Stage Functions ============
 
 /**
@@ -422,7 +481,8 @@ function getCompaniesByStage(stage) {
 function getPipelineStats() {
   const stats = db.prepare(`
     SELECT
-      SUM(CASE WHEN pipeline_stage = 'raw' OR pipeline_stage IS NULL THEN 1 ELSE 0 END) as raw,
+      SUM(CASE WHEN (pipeline_stage = 'raw' OR pipeline_stage IS NULL) AND website IS NOT NULL AND website != '' THEN 1 ELSE 0 END) as raw,
+      SUM(CASE WHEN pipeline_stage = 'no_website' OR ((pipeline_stage IS NULL OR pipeline_stage = 'raw') AND (website IS NULL OR website = '')) THEN 1 ELSE 0 END) as no_website,
       SUM(CASE WHEN pipeline_stage = 'enriched' THEN 1 ELSE 0 END) as enriched,
       SUM(CASE WHEN pipeline_stage = 'qualified' THEN 1 ELSE 0 END) as qualified,
       SUM(CASE WHEN pipeline_stage = 'ready' THEN 1 ELSE 0 END) as ready,
@@ -433,6 +493,7 @@ function getPipelineStats() {
 
   return {
     raw: stats.raw || 0,
+    no_website: stats.no_website || 0,
     enriched: stats.enriched || 0,
     qualified: stats.qualified || 0,
     ready: stats.ready || 0,
@@ -447,7 +508,7 @@ function getPipelineStats() {
  * @param {string} stage - New pipeline stage
  */
 function updatePipelineStage(id, stage) {
-  const validStages = ['raw', 'enriched', 'qualified', 'ready'];
+  const validStages = ['raw', 'no_website', 'enriched', 'qualified', 'ready'];
   if (!validStages.includes(stage)) {
     throw new Error(`Invalid pipeline stage: ${stage}`);
   }
@@ -635,6 +696,57 @@ function updateCompanyDescription(id, description) {
   `).run(description, id);
 }
 
+/**
+ * Save enrichment log (JSON object with URLs discovered, pages scraped, contacts parsed)
+ * @param {number} id - Company ID
+ * @param {Object} log - Enrichment log object
+ */
+function saveEnrichmentLog(id, log) {
+  const logJson = JSON.stringify(log);
+  db.prepare(`
+    UPDATE companies SET enrichment_log = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(logJson, id);
+}
+
+/**
+ * Set enrichment error (e.g., 'no_contacts', 'scrape_failed')
+ * @param {number} id - Company ID
+ * @param {string} error - Error type
+ */
+function setEnrichmentError(id, error) {
+  db.prepare(`
+    UPDATE companies SET enrichment_error = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(error, id);
+}
+
+/**
+ * Clear enrichment error
+ * @param {number} id - Company ID
+ */
+function clearEnrichmentError(id) {
+  db.prepare(`
+    UPDATE companies SET enrichment_error = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+}
+
+/**
+ * Get enrichment log for a company
+ * @param {number} id - Company ID
+ * @returns {Object|null} Parsed enrichment log or null
+ */
+function getEnrichmentLog(id) {
+  const row = db.prepare(`SELECT enrichment_log FROM companies WHERE id = ?`).get(id);
+  if (!row || !row.enrichment_log) return null;
+  try {
+    return JSON.parse(row.enrichment_log);
+  } catch (e) {
+    return null;
+  }
+}
+
 module.exports = {
   db,
   createSearch,
@@ -662,6 +774,9 @@ module.exports = {
   getUnenrichedCompanies,
   getUnvalidatedContacts,
   getContactById,
+  deleteContact,
+  updateContact,
+  setPrimaryContact,
   // Pipeline stage functions
   getCompaniesByStage,
   getPipelineStats,
@@ -673,5 +788,10 @@ module.exports = {
   getLocalDuplicates,
   getDistinctSegments,
   updateCompanyDescription,
-  extractDomain
+  extractDomain,
+  // Enrichment log functions
+  saveEnrichmentLog,
+  setEnrichmentError,
+  clearEnrichmentError,
+  getEnrichmentLog
 };

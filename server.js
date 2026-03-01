@@ -372,6 +372,18 @@ app.get('/api/companies/:id/contacts', asyncHandler((req, res) => {
   res.json(db.getContactsByCompany(req.params.id));
 }));
 
+app.get('/api/companies/:id/enrichment-log', asyncHandler((req, res) => {
+  const company = getCompanyOrFail(req.params.id, res);
+  if (!company) return;
+
+  const log = db.getEnrichmentLog(company.id);
+  res.json({
+    company_id: company.id,
+    enrichment_error: company.enrichment_error || null,
+    log: log || null
+  });
+}));
+
 // ============ Waterfall Enrichment (PRD-WATERFALL-ENRICHMENT) ============
 
 /**
@@ -484,8 +496,9 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
   }
 
   // Step 3: Discover and process contacts
+  let contactResult = null;
   await runEnrichmentStep('discoverContacts', result, async () => {
-    const contactResult = await discoverContacts(company.id, domain, HUNTER_API_KEY);
+    contactResult = await discoverContacts(company.id, domain, HUNTER_API_KEY);
     const contacts = contactResult.contacts || [];
 
     for (let i = 0; i < contacts.length; i++) {
@@ -494,11 +507,33 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
     }
   });
 
-  // Update pipeline stage to enriched
-  try {
-    db.updatePipelineStage(company.id, 'enriched');
-  } catch (stageErr) {
-    result.errors.push({ step: 'updatePipelineStage', error: stageErr.message });
+  // Save enrichment log
+  if (contactResult && contactResult.log) {
+    try {
+      db.saveEnrichmentLog(company.id, contactResult.log);
+      result.enrichment_log = contactResult.log;
+    } catch (logErr) {
+      result.errors.push({ step: 'saveEnrichmentLog', error: logErr.message });
+    }
+  }
+
+  // Only move to 'enriched' if we found contacts with emails
+  const contactsWithEmail = result.contacts.filter(c => c.email);
+  if (contactsWithEmail.length > 0) {
+    // Success - clear any previous error and move to enriched
+    try {
+      db.clearEnrichmentError(company.id);
+      db.updatePipelineStage(company.id, 'enriched');
+    } catch (stageErr) {
+      result.errors.push({ step: 'updatePipelineStage', error: stageErr.message });
+    }
+  } else {
+    // No contacts found - stay in raw, set error
+    try {
+      db.setEnrichmentError(company.id, 'no_contacts');
+    } catch (errErr) {
+      result.errors.push({ step: 'setEnrichmentError', error: errErr.message });
+    }
   }
 
   res.json(result);
@@ -670,6 +705,73 @@ app.post('/api/contacts/validate-batch', batchValidateLimiter, asyncHandler(asyn
   }
 
   res.json(results);
+}));
+
+// ============ Contact CRUD ============
+
+app.get('/api/contacts/:id', asyncHandler(async (req, res) => {
+  const contactId = validateId(req.params.id);
+  const contact = db.getContactById(contactId);
+
+  if (!contact) {
+    return res.status(404).json({ error: 'Contact not found' });
+  }
+
+  res.json(contact);
+}));
+
+app.delete('/api/contacts/:id', asyncHandler(async (req, res) => {
+  const contactId = validateId(req.params.id);
+  const contact = db.getContactById(contactId);
+
+  if (!contact) {
+    return res.status(404).json({ error: 'Contact not found' });
+  }
+
+  const companyId = db.deleteContact(contactId);
+  res.json({
+    success: true,
+    deleted_contact_id: contactId,
+    company_id: companyId
+  });
+}));
+
+app.put('/api/contacts/:id', asyncHandler(async (req, res) => {
+  const contactId = validateId(req.params.id);
+  const contact = db.getContactById(contactId);
+
+  if (!contact) {
+    return res.status(404).json({ error: 'Contact not found' });
+  }
+
+  const { email, first_name, last_name, full_name, title, phone, is_primary } = req.body;
+
+  // Validate email format if provided
+  if (email) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+  }
+
+  // Handle primary contact change
+  if (is_primary === true || is_primary === 1) {
+    db.setPrimaryContact(contact.company_id, contactId);
+  }
+
+  const updatedContact = db.updateContact(contactId, {
+    email,
+    first_name,
+    last_name,
+    full_name,
+    title,
+    phone
+  });
+
+  res.json({
+    success: true,
+    contact: updatedContact
+  });
 }));
 
 // ============ Pipeline Stage & Qualification ============

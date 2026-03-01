@@ -616,6 +616,11 @@ header h1 {
   margin-top: 24px;
 }
 
+.form-actions .btn {
+  min-width: 120px;
+  padding: 10px 20px;
+}
+
 /* Progress */
 .progress-content {
   text-align: center;
@@ -799,6 +804,87 @@ header h1 {
   border-top: 1px solid #E5E7EB;
   padding-top: 16px;
   margin-top: 16px;
+}
+
+/* Contact card header with actions */
+.contact-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.contact-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.contact-card:hover .contact-actions {
+  opacity: 1;
+}
+
+.contact-edit-btn,
+.contact-delete-btn {
+  background: none;
+  border: none;
+  padding: 4px;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease;
+}
+
+.contact-edit-btn {
+  color: #6B7280;
+}
+
+.contact-edit-btn:hover {
+  background: #E5E7EB;
+  color: #374151;
+}
+
+.contact-delete-btn {
+  color: #9CA3AF;
+}
+
+.contact-delete-btn:hover {
+  background: #FEE2E2;
+  color: #DC2626;
+}
+
+/* Contact phone field */
+.contact-phone {
+  font-size: 12px;
+  color: #6B7280;
+  margin-top: 4px;
+}
+
+/* Form row for two inputs side by side */
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+
+.form-row .form-group {
+  flex: 1;
+}
+
+/* Checkbox group styling */
+.checkbox-group label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: normal;
+}
+
+.checkbox-group input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #DC4A4A;
 }
 
 /* Waterfall/AI Enrich Button */
@@ -2058,6 +2144,120 @@ header h1 {
 }
 
 .stage-dot.raw { background: #9CA3AF; }
+.stage-dot.no_website { background: #F59E0B; }
 .stage-dot.enriched { background: #8B5CF6; }
 .stage-dot.qualified { background: #10B981; }
 .stage-dot.ready { background: #3B82F6; }
+
+/* ============ Enrichment Log ============ */
+
+.enrichment-log-section {
+  margin-top: 16px;
+  border-top: 1px solid #E5E7EB;
+  padding-top: 16px;
+}
+
+.enrichment-log-section .field-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.log-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  color: #6B7280;
+  transition: transform 0.2s ease;
+}
+
+.enrichment-log-section.collapsed .log-toggle {
+  transform: rotate(-90deg);
+}
+
+.enrichment-log-section.collapsed .enrichment-log {
+  display: none;
+}
+
+.enrichment-log {
+  background: #1F2937;
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 12px;
+  color: #E5E7EB;
+  margin-top: 8px;
+  overflow-x: auto;
+}
+
+.log-section {
+  margin-bottom: 12px;
+}
+
+.log-section:last-of-type {
+  margin-bottom: 8px;
+}
+
+.log-header {
+  color: #9CA3AF;
+  margin-bottom: 4px;
+}
+
+.log-item {
+  color: #D1D5DB;
+  padding-left: 8px;
+  line-height: 1.6;
+}
+
+.log-item.log-skipped {
+  color: #9CA3AF;
+  font-style: italic;
+}
+
+.log-result {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid #374151;
+  font-weight: 500;
+}
+
+.log-result.success {
+  color: #10B981;
+}
+
+.log-result.warning {
+  color: #F59E0B;
+}
+
+.log-result.error {
+  color: #EF4444;
+}
+
+/* No Website stage pill styling */
+.stage-pill[data-stage="no_website"] {
+  background: #FEF3C7;
+  color: #92400E;
+}
+
+.stage-pill[data-stage="no_website"].active {
+  background: #F59E0B;
+  color: white;
+}
+
+/* Enrichment error badge in table */
+.enrichment-error-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #FEE2E2;
+  color: #991B1B;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.enrichment-error-badge svg {
+  width: 12px;
+  height: 12px;
+}

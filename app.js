@@ -89,6 +89,44 @@ function setupEventListeners() {
       if (e.target === modal) hideModal(modal);
     });
   });
+
+  // Edit contact modal handlers
+  const editContactModal = document.getElementById('edit-contact-modal');
+  document.getElementById('edit-contact-form').addEventListener('submit', handleSaveContact);
+  document.getElementById('cancel-edit-contact').addEventListener('click', () => hideModal(editContactModal));
+  editContactModal.addEventListener('click', (e) => {
+    if (e.target === editContactModal) hideModal(editContactModal);
+  });
+
+  // Global ESC key to close any open modal/panel
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      // Close modals (in order of priority)
+      const modals = [editContactModal, searchModal, progressModal];
+      for (const modal of modals) {
+        if (!modal.classList.contains('hidden')) {
+          hideModal(modal);
+          return;
+        }
+      }
+      // Close full view panel
+      if (!fullViewPanel.classList.contains('hidden')) {
+        fullViewPanel.classList.add('hidden');
+        return;
+      }
+      // Close context menu
+      if (stageContextMenu && !stageContextMenu.classList.contains('hidden')) {
+        hideContextMenu();
+        return;
+      }
+      // Close more dropdown
+      const moreDropdown = document.getElementById('more-dropdown');
+      if (moreDropdown && !moreDropdown.classList.contains('hidden')) {
+        moreDropdown.classList.add('hidden');
+        return;
+      }
+    }
+  });
 }
 
 // More menu helpers
@@ -579,7 +617,15 @@ function applyFilters() {
     // Stage filter from progress bar
     let matchesStage = true;
     if (activeStageFilter) {
-      matchesStage = (c.pipeline_stage || 'raw') === activeStageFilter;
+      if (activeStageFilter === 'no_website') {
+        // Match companies without website
+        matchesStage = !c.website || c.pipeline_stage === 'no_website';
+      } else if (activeStageFilter === 'raw') {
+        // Match raw companies WITH website
+        matchesStage = c.website && (!c.pipeline_stage || c.pipeline_stage === 'raw');
+      } else {
+        matchesStage = c.pipeline_stage === activeStageFilter;
+      }
     }
 
     // Segment filter
@@ -1001,6 +1047,18 @@ async function showDetails(id) {
     if (company.types) types = JSON.parse(company.types);
   } catch (e) {}
 
+  // Fetch enrichment log
+  let enrichmentLogHtml = '';
+  try {
+    const logRes = await fetch(`/api/companies/${id}/enrichment-log`);
+    const logData = await logRes.json();
+    if (logData.log || logData.enrichment_error) {
+      enrichmentLogHtml = buildEnrichmentLogHtml(logData.log, logData.enrichment_error);
+    }
+  } catch (e) {
+    console.warn('Failed to fetch enrichment log:', e);
+  }
+
   // Fetch contacts if enriched
   let contactsHtml = '-';
   if (company.contacts_count > 0) {
@@ -1009,11 +1067,26 @@ async function showDetails(id) {
       const contacts = await res.json();
       if (contacts.length) {
         contactsHtml = contacts.map(c => `
-          <div class="contact-card ${c.is_primary ? 'primary' : ''}">
-            <div class="contact-name">${escapeHtml(c.full_name || c.email)}</div>
+          <div class="contact-card ${c.is_primary ? 'primary' : ''}" data-contact-id="${c.id}">
+            <div class="contact-card-header">
+              <div class="contact-name">${escapeHtml(c.full_name || c.email)}</div>
+              <div class="contact-actions">
+                <button class="contact-edit-btn" title="Edit contact" onclick="showEditContactModal(${c.id})">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="14" height="14">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+                  </svg>
+                </button>
+                <button class="contact-delete-btn" title="Delete contact" onclick="handleDeleteContact(${c.id}, ${id})">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="14" height="14">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+                  </svg>
+                </button>
+              </div>
+            </div>
             <div class="contact-email"><a href="mailto:${escapeHtml(c.email)}">${escapeHtml(c.email)}</a></div>
             ${c.title ? `<div class="contact-title">${escapeHtml(c.title)}</div>` : ''}
-            <div class="contact-confidence">${c.confidence}% confidence</div>
+            ${c.phone ? `<div class="contact-phone">${escapeHtml(c.phone)}</div>` : ''}
+            <div class="contact-confidence">${c.confidence || 0}% confidence</div>
           </div>
         `).join('');
       }
@@ -1084,6 +1157,7 @@ async function showDetails(id) {
       <div class="field-value"><span class="enrichment-badge ${company.enrichment_source.includes('web') ? 'web_scrape' : 'hunter'}">${escapeHtml(company.enrichment_source)}</span></div>
     </div>
     ` : ''}
+    ${enrichmentLogHtml}
     <div class="field">
       <div class="field-label">Business Status</div>
       <div class="field-value">${escapeHtml(company.business_status || '-')}</div>
@@ -1105,6 +1179,98 @@ async function showDetails(id) {
   fullViewPanel.classList.remove('hidden');
 }
 
+// Track current company being viewed for contact operations
+let currentDetailCompanyId = null;
+
+async function handleDeleteContact(contactId, companyId) {
+  if (!confirm('Delete this contact?')) return;
+
+  try {
+    const res = await fetch(`/api/contacts/${contactId}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+
+    // Refresh the company details panel
+    showDetails(companyId);
+
+    // Update company in local state
+    const company = companies.find(c => c.id === companyId);
+    if (company) {
+      company.contacts_count = Math.max(0, (company.contacts_count || 1) - 1);
+    }
+  } catch (err) {
+    console.error('Failed to delete contact:', err);
+    alert('Failed to delete contact: ' + err.message);
+  }
+}
+
+async function showEditContactModal(contactId) {
+  try {
+    // Fetch current contact data
+    const res = await fetch(`/api/contacts/${contactId}`);
+    if (!res.ok) throw new Error('Contact not found');
+
+    const contact = await res.json();
+
+    // Populate and show modal
+    document.getElementById('edit-contact-id').value = contact.id;
+    document.getElementById('edit-contact-company-id').value = contact.company_id;
+    document.getElementById('edit-contact-email').value = contact.email || '';
+    document.getElementById('edit-contact-first-name').value = contact.first_name || '';
+    document.getElementById('edit-contact-last-name').value = contact.last_name || '';
+    document.getElementById('edit-contact-title').value = contact.title || '';
+    document.getElementById('edit-contact-phone').value = contact.phone || '';
+    document.getElementById('edit-contact-primary').checked = contact.is_primary === 1;
+
+    showModal(document.getElementById('edit-contact-modal'));
+  } catch (err) {
+    console.error('Failed to load contact:', err);
+    alert('Failed to load contact for editing');
+  }
+}
+
+async function handleSaveContact(e) {
+  e.preventDefault();
+
+  const contactId = document.getElementById('edit-contact-id').value;
+  const companyId = document.getElementById('edit-contact-company-id').value;
+
+  const data = {
+    email: document.getElementById('edit-contact-email').value.trim(),
+    first_name: document.getElementById('edit-contact-first-name').value.trim(),
+    last_name: document.getElementById('edit-contact-last-name').value.trim(),
+    title: document.getElementById('edit-contact-title').value.trim(),
+    phone: document.getElementById('edit-contact-phone').value.trim(),
+    is_primary: document.getElementById('edit-contact-primary').checked
+  };
+
+  // Build full_name from first + last
+  data.full_name = [data.first_name, data.last_name].filter(Boolean).join(' ') || null;
+
+  try {
+    const res = await fetch(`/api/contacts/${contactId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+
+    hideModal(document.getElementById('edit-contact-modal'));
+
+    // Refresh the details panel
+    showDetails(parseInt(companyId));
+  } catch (err) {
+    console.error('Failed to update contact:', err);
+    alert('Failed to update contact: ' + err.message);
+  }
+}
+
 // ============ Utilities ============
 
 function showModal(modal) {
@@ -1113,6 +1279,95 @@ function showModal(modal) {
 
 function hideModal(modal) {
   modal.classList.add('hidden');
+}
+
+/**
+ * Build HTML for enrichment log display
+ * @param {Object} log - Enrichment log object from webScraper
+ * @param {string} error - Enrichment error type (e.g., 'no_contacts')
+ * @returns {string} HTML string
+ */
+function buildEnrichmentLogHtml(log, error) {
+  if (!log && !error) return '';
+
+  let resultClass = 'success';
+  let resultText = 'Success';
+
+  if (error === 'no_contacts' || (log && log.webScrape && log.webScrape.result === 'no_contacts')) {
+    resultClass = 'error';
+    resultText = 'No contacts found';
+  } else if (log && log.webScrape && log.webScrape.result === 'no_urls') {
+    resultClass = 'error';
+    resultText = 'Could not map domain';
+  } else if (log && log.webScrape && log.webScrape.result === 'no_relevant_pages') {
+    resultClass = 'warning';
+    resultText = 'No team/about pages found';
+  } else if (log && log.webScrape && log.webScrape.result === 'partial') {
+    resultClass = 'warning';
+    resultText = 'Contacts found (no email)';
+  }
+
+  const webLog = log?.webScrape || {};
+  const urlsDiscovered = webLog.urlsDiscovered || 0;
+  const pagesScraped = webLog.pagesScraped || [];
+  const contactsKept = webLog.contactsKept || [];
+  const genericSkipped = webLog.genericEmailsSkipped || [];
+
+  // Build pages scraped list
+  let pagesHtml = '';
+  if (pagesScraped.length > 0) {
+    pagesHtml = pagesScraped.map(p => {
+      const shortUrl = p.url.replace(/^https?:\/\/[^/]+/, '');
+      const statusIcon = p.status === 'success' ? '✓' : p.status === 'error' ? '✗' : '○';
+      return `<div class="log-item">├─ ${escapeHtml(shortUrl)} (${p.category}) ${statusIcon}</div>`;
+    }).join('');
+  } else {
+    pagesHtml = '<div class="log-item">└─ No pages scraped</div>';
+  }
+
+  // Build contacts list
+  let contactsHtml = '';
+  if (contactsKept.length > 0) {
+    contactsHtml = contactsKept.map(c => {
+      const role = c.role ? ` (${escapeHtml(c.role)})` : '';
+      return `<div class="log-item">├─ ${escapeHtml(c.name || 'Unknown')}${role} - ${escapeHtml(c.email)} ✓</div>`;
+    }).join('');
+  }
+  if (genericSkipped.length > 0) {
+    contactsHtml += `<div class="log-item log-skipped">└─ Skipped: ${genericSkipped.map(e => escapeHtml(e)).join(', ')}</div>`;
+  }
+  if (!contactsHtml) {
+    contactsHtml = '<div class="log-item">└─ No contacts extracted</div>';
+  }
+
+  return `
+    <div class="field enrichment-log-section">
+      <div class="field-label">
+        Enrichment Log
+        <button class="log-toggle" onclick="this.parentElement.parentElement.classList.toggle('collapsed')">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="enrichment-log">
+        <div class="log-section">
+          <div class="log-header">URLs discovered: ${urlsDiscovered}</div>
+        </div>
+        <div class="log-section">
+          <div class="log-header">Pages scraped: ${pagesScraped.length}</div>
+          ${pagesHtml}
+        </div>
+        <div class="log-section">
+          <div class="log-header">Contacts extracted: ${contactsKept.length}</div>
+          ${contactsHtml}
+        </div>
+        <div class="log-result ${resultClass}">
+          Result: ${resultClass === 'success' ? '✓' : '✗'} ${resultText}
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function escapeHtml(str) {
@@ -1210,8 +1465,9 @@ async function updatePipelineStats() {
     const res = await fetch('/api/companies/stats');
     pipelineStats = await res.json();
 
-    // Update labels for pipeline: Raw → Enriched → Qualified → Ready
+    // Update labels for pipeline: Raw → No Website → Enriched → Qualified → Ready
     document.getElementById('stat-raw').textContent = pipelineStats.raw || 0;
+    document.getElementById('stat-no_website').textContent = pipelineStats.no_website || 0;
     document.getElementById('stat-enriched').textContent = pipelineStats.enriched || 0;
     document.getElementById('stat-qualified').textContent = pipelineStats.qualified || 0;
     document.getElementById('stat-ready').textContent = pipelineStats.ready || 0;

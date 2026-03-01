@@ -2,6 +2,12 @@
 
 Local app for scraping business leads from Google Places API.
 
+## Working Style
+
+- **Plans should be ELI10** - Explain what happens in plain language, no code snippets
+- Keep things simple and focused
+- Show visibility into what's happening (logs, debug info) when things fail
+
 ## Quick Start
 
 ```bash

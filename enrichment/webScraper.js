@@ -381,27 +381,46 @@ function hasUsableContacts(contacts) {
  * @param {Object} options - Scraping options
  * @param {boolean} options.validateResults - Whether to validate emails/phones (default: true)
  * @param {number} options.maxAttempts - Max pages to try before giving up (default: 3)
- * @returns {Promise<Array<{name: string, role: string, email: string, phone: string, email_valid?: boolean, phone_valid?: boolean}>>}
+ * @param {boolean} options.returnLog - Whether to return log object (default: false for backwards compat)
+ * @returns {Promise<Array|{contacts: Array, log: Object}>}
  */
 async function scrapeTeamPages(domain, options = {}) {
-  const { validateResults = true, maxAttempts = 3 } = options;
+  const { validateResults = true, maxAttempts = 3, returnLog = false } = options;
+
+  // Initialize log object
+  const log = {
+    urlsDiscovered: 0,
+    pagesRanked: [],
+    pagesScraped: [],
+    contactsRaw: [],
+    contactsKept: [],
+    genericEmailsSkipped: [],
+    result: null,
+    error: null
+  };
 
   console.log(`[WebScraper] Starting scrape for: ${domain}`);
 
   // Step 1: Use /map to discover all URLs (1 credit, fast)
   const allUrls = await mapDomain(domain);
+  log.urlsDiscovered = allUrls.length;
 
   if (allUrls.length === 0) {
     console.warn(`[WebScraper] No URLs found for ${domain}`);
-    return [];
+    log.result = 'no_urls';
+    log.error = 'Firecrawl could not map this domain';
+    return returnLog ? { contacts: [], log } : [];
   }
 
   // Step 2: Use AI to rank top 3 pages (Team > About > Contact)
   const rankedPages = await rankBestPages(allUrls);
+  log.pagesRanked = rankedPages.map(p => ({ url: p.url, category: p.category }));
 
   if (rankedPages.length === 0) {
     console.warn(`[WebScraper] No relevant pages found for ${domain}`);
-    return [];
+    log.result = 'no_relevant_pages';
+    log.error = 'No team/about/contact pages found';
+    return returnLog ? { contacts: [], log } : [];
   }
 
   // Step 3: Try each ranked page until we find contacts with email/phone
@@ -412,14 +431,24 @@ async function scrapeTeamPages(domain, options = {}) {
     const page = rankedPages[i];
     console.log(`[WebScraper] Attempt ${i + 1}/${rankedPages.length}: Trying ${page.category} page: ${page.url}`);
 
+    const pageLog = { url: page.url, category: page.category, status: 'pending', contactsFound: 0 };
+
     try {
       // Scrape the page (1 credit per page)
       const html = await fetchPage(page.url);
+      pageLog.status = 'scraped';
 
       // Extract contacts
       let contacts = await extractContactsWithClaude(html);
+
+      // Track raw contacts before filtering
+      for (const c of contacts) {
+        log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone });
+      }
+
       contacts = verifyAndAddMissedContacts(contacts, html);
       const uniqueContacts = deduplicateContacts(contacts);
+      pageLog.contactsFound = uniqueContacts.length;
 
       console.log(`[WebScraper] Found ${uniqueContacts.length} contacts from ${page.category} page`);
 
@@ -428,9 +457,12 @@ async function scrapeTeamPages(domain, options = {}) {
         console.log(`[WebScraper] Success! Found contacts with email/phone on ${page.category} page`);
         allContacts = uniqueContacts;
         successfulPage = page;
+        pageLog.status = 'success';
+        log.pagesScraped.push(pageLog);
         break; // Stop trying more pages
       } else {
         console.log(`[WebScraper] No email/phone found on ${page.category} page, trying next...`);
+        pageLog.status = 'no_emails';
         // Keep contacts in case we need them as fallback
         if (uniqueContacts.length > allContacts.length) {
           allContacts = uniqueContacts;
@@ -438,16 +470,32 @@ async function scrapeTeamPages(domain, options = {}) {
       }
     } catch (error) {
       console.warn(`[WebScraper] Could not fetch ${page.url}: ${error.message}`);
-      continue;
+      pageLog.status = 'error';
+      pageLog.error = error.message;
+    }
+
+    log.pagesScraped.push(pageLog);
+  }
+
+  // Track which contacts were kept vs skipped
+  for (const contact of allContacts) {
+    if (contact.email && !isGenericEmail(contact.email)) {
+      log.contactsKept.push({ name: contact.name, role: contact.role, email: contact.email });
+    } else if (contact.email && isGenericEmail(contact.email)) {
+      log.genericEmailsSkipped.push(contact.email);
     }
   }
 
   if (successfulPage) {
     console.log(`[WebScraper] Final: ${allContacts.length} contacts from ${successfulPage.category} page`);
+    log.result = 'success';
   } else if (allContacts.length > 0) {
     console.log(`[WebScraper] Fallback: ${allContacts.length} contacts (no email/phone found)`);
+    log.result = 'partial';
   } else {
     console.log(`[WebScraper] No contacts found after ${maxAttempts} attempts`);
+    log.result = 'no_contacts';
+    log.error = 'No people found on scraped pages';
   }
 
   // Step 4: Optional validation
@@ -467,7 +515,7 @@ async function scrapeTeamPages(domain, options = {}) {
     }
   }
 
-  return allContacts;
+  return returnLog ? { contacts: allContacts, log } : allContacts;
 }
 
 module.exports = {
