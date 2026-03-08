@@ -29,8 +29,65 @@ const GENERIC_EMAIL_PREFIXES = [
   'info@', 'kontakt@', 'contact@', 'office@', 'support@',
   'sales@', 'hello@', 'obchod@', 'noreply@', 'chci@', 'poptavka@',
   'recepce@', 'fakturace@', 'admin@', 'marketing@', 'hr@', 'jobs@',
-  'kariera@', 'press@', 'media@'
+  'kariera@', 'press@', 'media@', 'podpora@', 'team@', 'partnerships@',
+  'helpdesk@', 'service@', 'billing@', 'accounts@', 'general@'
 ];
+
+/**
+ * Sanitize email address - remove URL encoding, HTML artifacts, validate format
+ * @param {string} email - Raw email string
+ * @returns {string|null} - Cleaned email or null if invalid
+ */
+function sanitizeEmail(email) {
+  if (!email || typeof email !== 'string') return null;
+
+  let cleaned = email.trim();
+
+  // Remove URL-encoded characters (%20, %40, etc.)
+  try {
+    cleaned = decodeURIComponent(cleaned);
+  } catch (e) {
+    // If decodeURIComponent fails, just remove common encoded chars manually
+    cleaned = cleaned.replace(/%20/g, '').replace(/%40/g, '@');
+  }
+
+  // Remove leading/trailing non-email characters (HTML artifacts like 'E' before 'info@')
+  // Keep only valid email characters
+  cleaned = cleaned.replace(/^[^a-zA-Z0-9._%+-]+/, ''); // Remove leading junk
+  cleaned = cleaned.replace(/[^a-zA-Z0-9._%+-]+$/, ''); // Remove trailing junk after TLD fix
+
+  // Fix: extract just the email if there's garbage attached
+  const emailMatch = cleaned.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+  if (!emailMatch) return null;
+  cleaned = emailMatch[1];
+
+  // Validate basic email format
+  if (!cleaned.includes('@') || !cleaned.includes('.')) return null;
+
+  // Check for company-name@ pattern (e.g., woxo@woxo.cz, bpa@bpa.cz)
+  const [localPart, domain] = cleaned.toLowerCase().split('@');
+  const domainName = domain.split('.')[0]; // Get domain without TLD
+  if (localPart === domainName) {
+    // This is a company@ email pattern - treat as generic
+    return null;
+  }
+
+  return cleaned.toLowerCase();
+}
+
+/**
+ * Check if email matches a generic pattern beyond just prefixes
+ * @param {string} email - Email to check
+ * @returns {boolean} True if generic/invalid
+ */
+function isCompanyPatternEmail(email) {
+  if (!email) return true;
+  const [localPart, domain] = email.toLowerCase().split('@');
+  if (!domain) return true;
+  const domainName = domain.split('.')[0];
+  // company@company.tld pattern
+  return localPart === domainName;
+}
 
 
 /**
@@ -269,14 +326,19 @@ function isGenericEmail(email) {
 }
 
 /**
- * Filter out generic email, return trimmed email or null
+ * Filter out generic email, return sanitized email or null
  * @param {string} email - Email to filter
- * @returns {string|null} Cleaned email or null if generic
+ * @returns {string|null} Cleaned email or null if generic/invalid
  */
 function filterGenericEmail(email) {
   if (!email) return null;
-  const trimmed = email.trim();
-  return isGenericEmail(trimmed) ? null : trimmed;
+
+  // First sanitize (removes URL encoding, HTML artifacts, extracts valid email)
+  const sanitized = sanitizeEmail(email);
+  if (!sanitized) return null;
+
+  // Then check if it's a generic prefix
+  return isGenericEmail(sanitized) ? null : sanitized;
 }
 
 /**
@@ -285,17 +347,37 @@ function filterGenericEmail(email) {
  * @returns {string[]} - Array of personal email addresses found
  */
 function extractEmailsFromHtml(html) {
-  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-  const matches = html.match(emailRegex) || [];
+  // First decode any URL-encoded content in HTML
+  let decodedHtml = html;
+  try {
+    decodedHtml = decodeURIComponent(html.replace(/\+/g, ' '));
+  } catch (e) {
+    // If full decode fails, just handle common patterns
+    decodedHtml = html.replace(/%40/g, '@').replace(/%20/g, '');
+  }
 
-  return [...new Set(matches)].filter(email => {
-    if (isGenericEmail(email)) return false;
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  const matches = decodedHtml.match(emailRegex) || [];
+
+  const validEmails = [];
+  for (const rawEmail of [...new Set(matches)]) {
+    // Sanitize each email
+    const sanitized = sanitizeEmail(rawEmail);
+    if (!sanitized) continue;
+
+    // Filter out generic emails
+    if (isGenericEmail(sanitized)) continue;
+
     // Filter out image/file references with @ (e.g., logo@2x.png)
-    if (/\.(png|jpg|jpeg|gif|svg|webp|ico|css|js)$/i.test(email)) return false;
+    if (/\.(png|jpg|jpeg|gif|svg|webp|ico|css|js)$/i.test(sanitized)) continue;
+
     // Filter out obviously fake/placeholder emails
-    if (/example\.|test@|placeholder|jmenujise@/i.test(email)) return false;
-    return true;
-  });
+    if (/example\.|test@|placeholder|jmenujise@/i.test(sanitized)) continue;
+
+    validEmails.push(sanitized);
+  }
+
+  return [...new Set(validEmails)]; // Dedupe again after sanitization
 }
 
 /**
@@ -550,6 +632,8 @@ module.exports = {
   // Utilities
   isGenericEmail,
   filterGenericEmail,
+  sanitizeEmail,
+  isCompanyPatternEmail,
   GENERIC_EMAIL_PREFIXES,
   PAGE_CATEGORIES
 };

@@ -7,7 +7,8 @@
  *
  * Waterfall order:
  * 1. Web scraping (FREE) - scrape team/contact pages
- * 2. Hunter.io API (PAID) - fallback if no contacts found
+ * 2. Hunter email-finder (PAID) - recover emails for contacts found with names but no emails
+ * 3. Hunter domain-search (PAID) - fallback if no contacts found at all
  */
 
 const webScraper = require('./webScraper');
@@ -16,8 +17,87 @@ const hunter = require('../hunter');
 // Default confidence scores by source
 const DEFAULT_CONFIDENCE = {
   web_scrape: 50,
-  hunter: 0
+  hunter: 0,
+  hunter_finder: 75  // Higher confidence when we find email for a known person
 };
+
+/**
+ * Try to recover emails for contacts that have names but no emails
+ * Uses Hunter email-finder API
+ *
+ * @param {Array} contacts - Normalized contacts (some may be missing emails)
+ * @param {string} domain - Company domain
+ * @param {string} hunterApiKey - Hunter.io API key
+ * @returns {Promise<{contacts: Array, emailsRecovered: number, log: Object}>}
+ */
+async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
+  const log = {
+    contactsChecked: 0,
+    emailsRecovered: 0,
+    patternsGenerated: 0,
+    errors: []
+  };
+
+  if (!hunterApiKey) {
+    log.skipped = true;
+    log.reason = 'no_api_key';
+    return { contacts, emailsRecovered: 0, log };
+  }
+
+  const enrichedContacts = [];
+
+  for (const contact of contacts) {
+    // Skip contacts that already have emails
+    if (contact.email) {
+      enrichedContacts.push(contact);
+      continue;
+    }
+
+    // Skip contacts without names (can't look them up)
+    if (!contact.name && !contact.firstName) {
+      enrichedContacts.push(contact);
+      continue;
+    }
+
+    log.contactsChecked++;
+
+    try {
+      const result = await hunter.findEmailForContact(contact, domain, hunterApiKey);
+
+      if (result.email) {
+        // Found email via Hunter!
+        log.emailsRecovered++;
+        enrichedContacts.push({
+          ...contact,
+          email: result.email,
+          confidence: result.confidence || DEFAULT_CONFIDENCE.hunter_finder,
+          source: 'hunter_finder',
+          emailSource: 'hunter_finder'
+        });
+        console.log(`[Waterfall] Recovered email for ${contact.name}: ${result.email}`);
+      } else if (result.patterns && result.patterns.length > 0) {
+        // No email found, but we have pattern suggestions
+        log.patternsGenerated++;
+        enrichedContacts.push({
+          ...contact,
+          suggestedEmails: result.patterns,
+          emailSource: 'pattern_suggestions'
+        });
+      } else {
+        enrichedContacts.push(contact);
+      }
+    } catch (error) {
+      log.errors.push({ name: contact.name, error: error.message });
+      enrichedContacts.push(contact);
+    }
+  }
+
+  return {
+    contacts: enrichedContacts,
+    emailsRecovered: log.emailsRecovered,
+    log
+  };
+}
 
 /**
  * Discover contacts for a company using waterfall approach
@@ -52,10 +132,27 @@ async function discoverContacts(companyId, domain, hunterApiKey) {
 
     if (scrapedContacts && scrapedContacts.length > 0) {
       console.log(`[Waterfall] Found ${scrapedContacts.length} contacts via web scrape for ${cleanDomain}`);
+
+      // Normalize contacts first
+      let normalizedContacts = normalizeContacts(scrapedContacts, 'web_scrape');
+
+      // Step 1.5: Try to recover emails for contacts with names but no emails
+      const contactsWithoutEmails = normalizedContacts.filter(c => !c.email && (c.name || c.firstName));
+      if (contactsWithoutEmails.length > 0 && hunterApiKey) {
+        console.log(`[Waterfall] Attempting to recover emails for ${contactsWithoutEmails.length} contacts without emails`);
+        const enrichResult = await enrichContactsWithMissingEmails(normalizedContacts, cleanDomain, hunterApiKey);
+        normalizedContacts = enrichResult.contacts;
+        log.emailRecovery = enrichResult.log;
+
+        if (enrichResult.emailsRecovered > 0) {
+          console.log(`[Waterfall] Recovered ${enrichResult.emailsRecovered} emails via Hunter email-finder`);
+        }
+      }
+
       log.source = 'web_scrape';
       return {
         source: 'web_scrape',
-        contacts: normalizeContacts(scrapedContacts, 'web_scrape'),
+        contacts: normalizedContacts,
         companyId,
         log
       };
@@ -233,6 +330,7 @@ function getWaterfallStats(results) {
 module.exports = {
   discoverContacts,
   discoverContactsBatch,
+  enrichContactsWithMissingEmails,
   normalizeContacts,
   getWaterfallStats
 };
