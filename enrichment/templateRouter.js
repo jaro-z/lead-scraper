@@ -11,8 +11,11 @@
  * Format: regex pattern (case-insensitive) => template name
  */
 const ROLE_TEMPLATES = {
-  // CEO/Founders/Owners - Strategic Partnership
-  'ceo|founder|owner|jednatel|majitel|zakladatel': 'strategic_partnership',
+  // CEO/Founders/Owners/Directors - Strategic Partnership
+  // Includes: CEO, founder, owner, director, partner, management, board
+  // Czech: jednatel (statutory director), majitel (owner), zakladatel (founder),
+  //        ředitel (director), vedení (management), společník (partner)
+  'ceo|founder|co-founder|owner|director|partner|managing|president|principal|board|vedení|management|jednatel|majitel|zakladatel|ředitel|ředitelka|společník|spolumajitel': 'strategic_partnership',
 
   // COO/Operations - Process Automation
   'coo|operations|provozni|provoz': 'process_automation',
@@ -26,6 +29,22 @@ const ROLE_TEMPLATES = {
   // CTO/Tech/IT - Tech Integration
   'cto|tech|it|technicky|developer': 'tech_integration'
 };
+
+/**
+ * Pattern to identify decision-makers (CEO/founder level contacts)
+ * Used for flagging high-priority contacts
+ */
+const DECISION_MAKER_PATTERN = /\b(ceo|founder|co-founder|cofounder|owner|director|partner|managing|president|principal|board|vedení|management|jednatel|majitel|zakladatel|ředitel|ředitelka|společník|spolumajitel|chief|head)\b/i;
+
+/**
+ * Check if a role/title indicates a decision-maker
+ * @param {string} role - Job title/role
+ * @returns {boolean} True if this is a decision-maker role
+ */
+function isDecisionMaker(role) {
+  if (!role) return false;
+  return DECISION_MAKER_PATTERN.test(role);
+}
 
 /**
  * Assign a template type based on contact role/title
@@ -69,7 +88,9 @@ function assignTemplatesBatch(contacts) {
 
 module.exports = {
   assignTemplate,
+  isDecisionMaker,
   ROLE_TEMPLATES,
+  DECISION_MAKER_PATTERN,
   getTemplateTypes,
   assignTemplatesBatch
 };

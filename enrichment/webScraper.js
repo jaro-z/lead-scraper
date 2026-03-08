@@ -235,9 +235,13 @@ function cleanHtml(html) {
 /**
  * Extract contacts from HTML using Claude API
  * @param {string} html - Page HTML content
+ * @param {Object} options - Extraction options
+ * @param {boolean} options.keepGeneric - If true, keep generic emails (info@, etc.) in results
  * @returns {Promise<Array<{name: string, role: string, email: string, phone: string}>>}
  */
-async function extractContactsWithClaude(html) {
+async function extractContactsWithClaude(html, options = {}) {
+  const { keepGeneric = false } = options;
+
   // Clean and truncate HTML to fit in API limits
   const cleanedHtml = cleanHtml(html);
   const truncatedHtml = cleanedHtml.substring(0, 100000); // Increased from 50KB to 100KB
@@ -251,28 +255,34 @@ async function extractContactsWithClaude(html) {
         content: `Extract team contacts from this company website.
 
 PRIORITY ORDER - List contacts in this order of importance:
-1. CEO / Owner / Founder / Majitel / Jednatel / Zakladatel (HIGHEST)
-2. COO / CFO / CTO / CMO / Directors / Ředitel
+1. CEO / Owner / Founder / Majitel / Jednatel / Zakladatel / Managing Director (HIGHEST)
+2. COO / CFO / CTO / CMO / Directors / Ředitel / Partner / Management / Vedení
 3. Managers and other team members
 
 CRITICAL: Extract EVERY person visible. Do not stop after finding one.
 
 Look for:
 - People with photos, headshots, or profile cards
-- People with job titles
+- People with job titles (including "Company management", "Vedení firmy", etc.)
 - Anyone with email or phone shown
 - Contact cards, team grids, footer sections
+- Management/leadership sections
 
 For each person, extract:
 - name: Full name
-- role: Job title (keep original language)
-- email: Email (or null)
+- role: Job title (keep original language, include department if no title)
+- email: Email (or null) - include ALL emails, even generic ones like info@
 - phone: Phone (or null)
+
+IMPORTANT role detection:
+- "Company management" / "Vedení společnosti" = decision maker
+- "Managing" / "Director" / "Partner" = decision maker
+- "Jednatel" / "Majitel" / "Ředitel" = decision maker (Czech titles)
 
 Rules:
 - Include ALL people visible
-- Skip generic emails: info@, kontakt@, support@, office@, obchod@
-- Czech: jednatel=director, majitel=owner, ředitel=CEO/director
+- Include ALL emails found (we'll filter later)
+- Czech: jednatel=statutory director, majitel=owner, ředitel=CEO/director
 - Return sorted by PRIORITY above (CEO/owner first)
 
 Return ONLY a JSON array:
@@ -302,7 +312,10 @@ ${truncatedHtml}`
       .map(contact => ({
         name: sanitizeContactField(contact.name),
         role: sanitizeContactField(contact.role),
-        email: filterGenericEmail(contact.email),
+        // If keepGeneric, just sanitize; otherwise filter out generic emails
+        email: keepGeneric
+          ? sanitizeEmail(contact.email)
+          : filterGenericEmail(contact.email),
         phone: sanitizeContactField(contact.phone)
       }))
       .filter(contact => contact.name);
@@ -424,36 +437,146 @@ function verifyAndAddMissedContacts(contacts, html) {
 }
 
 /**
- * Deduplicate contacts by email (or name if no email)
+ * Normalize a name for matching (lowercase, remove diacritics, trim)
+ * @param {string} name - Name to normalize
+ * @returns {string} Normalized name
+ */
+function normalizeName(name) {
+  if (!name) return '';
+  return name.toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // Remove diacritics
+    .replace(/[^a-z\s]/g, '') // Keep only letters and spaces
+    .trim();
+}
+
+/**
+ * Extract surname from email (e.g., "rojek@company.cz" -> "rojek")
+ * @param {string} email - Email address
+ * @returns {string|null} Extracted surname or null
+ */
+function extractSurnameFromEmail(email) {
+  if (!email) return null;
+  const localPart = email.split('@')[0].toLowerCase();
+  // Common patterns: surname, firstname.surname, f.surname
+  const parts = localPart.split(/[._-]/);
+  // Return the last part as potential surname
+  return parts[parts.length - 1];
+}
+
+/**
+ * Check if a name contains a surname that matches the email
+ * @param {string} name - Full name
+ * @param {string} email - Email address
+ * @returns {boolean} True if name likely matches email
+ */
+function nameMatchesEmail(name, email) {
+  if (!name || !email) return false;
+
+  const normalizedName = normalizeName(name);
+  const surname = extractSurnameFromEmail(email);
+
+  if (!surname || surname.length < 3) return false;
+
+  // Check if the surname appears in the normalized name
+  return normalizedName.includes(surname);
+}
+
+/**
+ * Deduplicate and merge contacts by email, name, or email-name matching
+ * Handles cases where name is on one page and email is on another
  * @param {Array} contacts - Array of contact objects
- * @returns {Array} - Deduplicated contacts
+ * @returns {Array} - Deduplicated and merged contacts
  */
 function deduplicateContacts(contacts) {
-  const seen = new Map();
+  const byEmail = new Map(); // email -> contact
+  const byName = new Map();  // normalized name -> contact
+  const result = [];
 
+  // First pass: collect all contacts by email and name
   for (const contact of contacts) {
-    // Use email as primary key, fall back to lowercase name
-    const key = contact.email
-      ? contact.email.toLowerCase()
-      : contact.name?.toLowerCase();
+    const email = contact.email?.toLowerCase();
+    const normalizedName = normalizeName(contact.name);
 
-    if (!key) continue;
+    if (email && byEmail.has(email)) {
+      // Merge with existing email match
+      const existing = byEmail.get(email);
+      byEmail.set(email, mergeContacts(existing, contact));
+    } else if (email) {
+      byEmail.set(email, contact);
+    }
 
-    if (!seen.has(key)) {
-      seen.set(key, contact);
-    } else {
-      // Merge: prefer non-null values
-      const existing = seen.get(key);
-      seen.set(key, {
-        name: existing.name || contact.name,
-        role: existing.role || contact.role,
-        email: existing.email || contact.email,
-        phone: existing.phone || contact.phone
-      });
+    if (normalizedName && normalizedName.length > 2) {
+      if (byName.has(normalizedName)) {
+        // Merge with existing name match
+        const existing = byName.get(normalizedName);
+        byName.set(normalizedName, mergeContacts(existing, contact));
+      } else {
+        byName.set(normalizedName, contact);
+      }
     }
   }
 
-  return Array.from(seen.values());
+  // Second pass: try to match names with emails (cross-page merging)
+  // e.g., "Miroslav Rojek" from /tym matches "rojek@company.cz" from /kontakt
+  for (const [email, emailContact] of byEmail) {
+    let merged = false;
+    for (const [name, nameContact] of byName) {
+      if (nameMatchesEmail(nameContact.name, email)) {
+        // Found a match! Merge the contacts
+        const mergedContact = mergeContacts(nameContact, emailContact);
+        result.push(mergedContact);
+        byName.delete(name); // Remove from name map so we don't add it twice
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) {
+      result.push(emailContact);
+    }
+  }
+
+  // Add remaining name-only contacts
+  for (const contact of byName.values()) {
+    // Check if this contact wasn't already merged via email match
+    const hasEmail = result.some(c =>
+      c.email && normalizeName(c.name) === normalizeName(contact.name)
+    );
+    if (!hasEmail) {
+      result.push(contact);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Merge two contacts, preferring non-null values and better roles
+ * @param {Object} a - First contact
+ * @param {Object} b - Second contact
+ * @returns {Object} Merged contact
+ */
+function mergeContacts(a, b) {
+  // Prefer the role that's more specific (longer or has decision-maker keywords)
+  let role = a.role || b.role;
+  if (a.role && b.role) {
+    // Prefer role with decision-maker keywords
+    const dmPattern = /ceo|founder|owner|director|partner|ředitel|jednatel|majitel/i;
+    if (dmPattern.test(b.role) && !dmPattern.test(a.role)) {
+      role = b.role;
+    } else if (b.role.length > a.role.length && !dmPattern.test(a.role)) {
+      role = b.role;
+    }
+  }
+
+  return {
+    name: a.name || b.name,
+    role: role,
+    email: a.email || b.email,
+    phone: a.phone || b.phone,
+    // Preserve any additional fields
+    ...(a.email_valid !== undefined && { email_valid: a.email_valid || b.email_valid }),
+    ...(a.phone_valid !== undefined && { phone_valid: a.phone_valid || b.phone_valid })
+  };
 }
 
 /**
@@ -466,28 +589,32 @@ function hasUsableContacts(contacts) {
 }
 
 /**
- * Main function: Scrape contacts from a domain with retry loop
- * Uses Firecrawl /map to discover URLs, ranks top 3 pages, and tries each
- * until contacts with email/phone are found.
+ * Main function: Scrape contacts from a domain
+ * Uses Firecrawl /map to discover URLs, ranks top 3 pages, scrapes ALL of them,
+ * and merges contacts across pages.
  *
  * @param {string} domain - Company domain (e.g., "ppcone.cz")
  * @param {Object} options - Scraping options
  * @param {boolean} options.validateResults - Whether to validate emails/phones (default: true)
- * @param {number} options.maxAttempts - Max pages to try before giving up (default: 3)
+ * @param {number} options.maxAttempts - Max pages to scrape (default: 3)
  * @param {boolean} options.returnLog - Whether to return log object (default: false for backwards compat)
  * @returns {Promise<Array|{contacts: Array, log: Object}>}
  */
 async function scrapeTeamPages(domain, options = {}) {
   const { validateResults = true, maxAttempts = 3, returnLog = false } = options;
 
-  // Initialize log object
+  // Initialize log object with detailed tracking
   const log = {
     urlsDiscovered: 0,
     pagesRanked: [],
     pagesScraped: [],
     contactsRaw: [],
     contactsKept: [],
-    genericEmailsSkipped: [],
+    genericEmailsFound: [],      // Track generic emails (kept as fallback)
+    genericEmailsOnly: false,    // Flag when only generic emails available
+    decisionMakerFound: false,   // Track if we found a CEO/founder
+    decisionMakerReason: null,   // Why no DM found (e.g., "no matching titles on pages X, Y, Z")
+    crossPageMerges: 0,          // Count of contacts merged across pages
     result: null,
     error: null
   };
@@ -502,6 +629,7 @@ async function scrapeTeamPages(domain, options = {}) {
     console.warn(`[WebScraper] No URLs found for ${domain}`);
     log.result = 'no_urls';
     log.error = 'Firecrawl could not map this domain';
+    log.decisionMakerReason = 'Could not access website';
     return returnLog ? { contacts: [], log } : [];
   }
 
@@ -512,55 +640,52 @@ async function scrapeTeamPages(domain, options = {}) {
   if (rankedPages.length === 0) {
     console.warn(`[WebScraper] No relevant pages found for ${domain}`);
     log.result = 'no_relevant_pages';
-    log.error = 'No team/about/contact pages found';
+    log.error = 'No team/about/contact pages found in site map';
+    log.decisionMakerReason = `No team/about/contact pages found among ${allUrls.length} URLs`;
     return returnLog ? { contacts: [], log } : [];
   }
 
-  // Step 3: Try each ranked page until we find contacts with email/phone
-  let allContacts = [];
-  let successfulPage = null;
+  // Step 3: Scrape ALL ranked pages and collect contacts
+  let allContactsRaw = [];
+  let allGenericEmails = [];
 
   for (let i = 0; i < Math.min(rankedPages.length, maxAttempts); i++) {
     const page = rankedPages[i];
-    console.log(`[WebScraper] Attempt ${i + 1}/${rankedPages.length}: Trying ${page.category} page: ${page.url}`);
+    console.log(`[WebScraper] Scraping page ${i + 1}/${rankedPages.length}: ${page.category} - ${page.url}`);
 
-    const pageLog = { url: page.url, category: page.category, status: 'pending', contactsFound: 0 };
+    const pageLog = { url: page.url, category: page.category, status: 'pending', contactsFound: 0, genericEmails: [] };
 
     try {
       // Scrape the page (1 credit per page)
       const html = await fetchPage(page.url);
       pageLog.status = 'scraped';
 
-      // Extract contacts
-      let contacts = await extractContactsWithClaude(html);
+      // Extract contacts (includes generic emails at this stage)
+      let contacts = await extractContactsWithClaude(html, { keepGeneric: true });
 
       // Track raw contacts before filtering
       for (const c of contacts) {
-        log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone });
+        log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: page.url });
+      }
+
+      // Also extract emails from raw HTML (backup)
+      const htmlEmails = extractEmailsFromHtmlWithGeneric(html);
+      for (const email of htmlEmails.generic) {
+        if (!allGenericEmails.includes(email)) {
+          allGenericEmails.push(email);
+          pageLog.genericEmails.push(email);
+        }
       }
 
       contacts = verifyAndAddMissedContacts(contacts, html);
-      const uniqueContacts = deduplicateContacts(contacts);
-      pageLog.contactsFound = uniqueContacts.length;
+      pageLog.contactsFound = contacts.length;
 
-      console.log(`[WebScraper] Found ${uniqueContacts.length} contacts from ${page.category} page`);
+      console.log(`[WebScraper] Found ${contacts.length} contacts from ${page.category} page`);
 
-      // Check if we found usable contacts (with email or phone)
-      if (hasUsableContacts(uniqueContacts)) {
-        console.log(`[WebScraper] Success! Found contacts with email/phone on ${page.category} page`);
-        allContacts = uniqueContacts;
-        successfulPage = page;
-        pageLog.status = 'success';
-        log.pagesScraped.push(pageLog);
-        break; // Stop trying more pages
-      } else {
-        console.log(`[WebScraper] No email/phone found on ${page.category} page, trying next...`);
-        pageLog.status = 'no_emails';
-        // Keep contacts in case we need them as fallback
-        if (uniqueContacts.length > allContacts.length) {
-          allContacts = uniqueContacts;
-        }
-      }
+      // Collect all contacts for cross-page merging
+      allContactsRaw.push(...contacts);
+      pageLog.status = contacts.length > 0 ? 'success' : 'no_contacts';
+
     } catch (error) {
       console.warn(`[WebScraper] Could not fetch ${page.url}: ${error.message}`);
       pageLog.status = 'error';
@@ -570,30 +695,95 @@ async function scrapeTeamPages(domain, options = {}) {
     log.pagesScraped.push(pageLog);
   }
 
-  // Track which contacts were kept vs skipped
-  for (const contact of allContacts) {
-    if (contact.email && !isGenericEmail(contact.email)) {
-      log.contactsKept.push({ name: contact.name, role: contact.role, email: contact.email });
-    } else if (contact.email && isGenericEmail(contact.email)) {
-      log.genericEmailsSkipped.push(contact.email);
+  // Step 4: Merge contacts across all pages (handles name-email matching)
+  const contactCountBefore = allContactsRaw.length;
+  let mergedContacts = deduplicateContacts(allContactsRaw);
+  log.crossPageMerges = contactCountBefore - mergedContacts.length;
+
+  if (log.crossPageMerges > 0) {
+    console.log(`[WebScraper] Merged ${log.crossPageMerges} contacts across pages`);
+  }
+
+  // Step 5: Separate personal vs generic emails
+  const personalContacts = mergedContacts.filter(c => c.email && !isGenericEmail(c.email));
+  const genericContacts = mergedContacts.filter(c => c.email && isGenericEmail(c.email));
+  const noEmailContacts = mergedContacts.filter(c => !c.email && c.name);
+
+  // Track generic emails found
+  log.genericEmailsFound = [...new Set([
+    ...genericContacts.map(c => c.email),
+    ...allGenericEmails
+  ])];
+
+  // Step 6: Determine final contacts
+  let finalContacts;
+  if (personalContacts.length > 0) {
+    // We have personal emails - use those + contacts without emails (for Hunter recovery)
+    finalContacts = [...personalContacts, ...noEmailContacts];
+    log.result = 'success';
+  } else if (noEmailContacts.length > 0) {
+    // We have names but no personal emails - keep them for Hunter lookup
+    // Also include ONE generic email as fallback contact point
+    finalContacts = [...noEmailContacts];
+    if (log.genericEmailsFound.length > 0) {
+      finalContacts.push({
+        name: 'General Contact',
+        role: 'Company Email',
+        email: log.genericEmailsFound[0],
+        isGenericFallback: true
+      });
+    }
+    log.result = 'partial';
+    log.genericEmailsOnly = true;
+  } else if (log.genericEmailsFound.length > 0) {
+    // Only generic emails found - return as fallback
+    finalContacts = [{
+      name: 'General Contact',
+      role: 'Company Email',
+      email: log.genericEmailsFound[0],
+      isGenericFallback: true
+    }];
+    log.result = 'generic_only';
+    log.genericEmailsOnly = true;
+  } else {
+    finalContacts = [];
+    log.result = 'no_contacts';
+    log.error = 'No contacts or emails found on any scraped page';
+  }
+
+  // Step 7: Check for decision-makers and log why if not found
+  const dmPattern = /\b(ceo|founder|co-founder|owner|director|partner|managing|president|principal|vedení|management|jednatel|majitel|zakladatel|ředitel)\b/i;
+  const decisionMakers = finalContacts.filter(c => c.role && dmPattern.test(c.role));
+
+  if (decisionMakers.length > 0) {
+    log.decisionMakerFound = true;
+    console.log(`[WebScraper] Decision-maker found: ${decisionMakers[0].name} (${decisionMakers[0].role})`);
+  } else {
+    log.decisionMakerFound = false;
+    // Build reason why no DM found
+    const pagesScrapedStr = log.pagesScraped.map(p => p.url).join(', ');
+    const rolesFound = log.contactsRaw.map(c => c.role).filter(Boolean);
+    if (rolesFound.length > 0) {
+      log.decisionMakerReason = `No CEO/founder/director titles found. Roles seen: ${[...new Set(rolesFound)].slice(0, 5).join(', ')}. Pages scraped: ${pagesScrapedStr}`;
+    } else if (log.contactsRaw.length > 0) {
+      log.decisionMakerReason = `Found ${log.contactsRaw.length} contacts but no job titles extracted. Pages scraped: ${pagesScrapedStr}`;
+    } else {
+      log.decisionMakerReason = `No contacts found on pages: ${pagesScrapedStr}`;
     }
   }
 
-  if (successfulPage) {
-    console.log(`[WebScraper] Final: ${allContacts.length} contacts from ${successfulPage.category} page`);
-    log.result = 'success';
-  } else if (allContacts.length > 0) {
-    console.log(`[WebScraper] Fallback: ${allContacts.length} contacts (no email/phone found)`);
-    log.result = 'partial';
-  } else {
-    console.log(`[WebScraper] No contacts found after ${maxAttempts} attempts`);
-    log.result = 'no_contacts';
-    log.error = 'No people found on scraped pages';
+  // Track which contacts were kept
+  for (const contact of finalContacts) {
+    if (contact.email && !contact.isGenericFallback) {
+      log.contactsKept.push({ name: contact.name, role: contact.role, email: contact.email });
+    }
   }
 
-  // Step 4: Optional validation
+  console.log(`[WebScraper] Final: ${finalContacts.length} contacts (${personalContacts.length} with personal emails, ${noEmailContacts.length} names only, ${log.genericEmailsFound.length} generic)`);
+
+  // Step 8: Optional validation
   if (validateResults) {
-    for (const contact of allContacts) {
+    for (const contact of finalContacts) {
       if (contact.email) {
         const emailResult = await validateEmail(contact.email);
         contact.email_valid = emailResult.valid;
@@ -608,7 +798,44 @@ async function scrapeTeamPages(domain, options = {}) {
     }
   }
 
-  return returnLog ? { contacts: allContacts, log } : allContacts;
+  return returnLog ? { contacts: finalContacts, log } : finalContacts;
+}
+
+/**
+ * Extract emails from HTML, separating personal from generic
+ * @param {string} html - Raw HTML content
+ * @returns {{personal: string[], generic: string[]}}
+ */
+function extractEmailsFromHtmlWithGeneric(html) {
+  let decodedHtml = html;
+  try {
+    decodedHtml = decodeURIComponent(html.replace(/\+/g, ' '));
+  } catch (e) {
+    decodedHtml = html.replace(/%40/g, '@').replace(/%20/g, '');
+  }
+
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  const matches = decodedHtml.match(emailRegex) || [];
+
+  const personal = [];
+  const generic = [];
+
+  for (const rawEmail of [...new Set(matches)]) {
+    const sanitized = sanitizeEmail(rawEmail);
+    if (!sanitized) continue;
+
+    // Filter out image/file references
+    if (/\.(png|jpg|jpeg|gif|svg|webp|ico|css|js)$/i.test(sanitized)) continue;
+    if (/example\.|test@|placeholder|jmenujise@/i.test(sanitized)) continue;
+
+    if (isGenericEmail(sanitized)) {
+      if (!generic.includes(sanitized)) generic.push(sanitized);
+    } else {
+      if (!personal.includes(sanitized)) personal.push(sanitized);
+    }
+  }
+
+  return { personal, generic };
 }
 
 module.exports = {
@@ -624,10 +851,17 @@ module.exports = {
   // Contact extraction
   extractContactsWithClaude,
   extractEmailsFromHtml,
+  extractEmailsFromHtmlWithGeneric,
   verifyAndAddMissedContacts,
   deduplicateContacts,
+  mergeContacts,
   guessNameFromEmail,
   hasUsableContacts,
+
+  // Name/email matching
+  normalizeName,
+  extractSurnameFromEmail,
+  nameMatchesEmail,
 
   // Utilities
   isGenericEmail,
