@@ -636,15 +636,23 @@ async function scrapeTeamPages(domain, options = {}) {
   }
 
   // Step 2: Use AI to rank top 3 pages (Team > About > Contact)
-  const rankedPages = await rankBestPages(allUrls);
+  let rankedPages = await rankBestPages(allUrls);
   log.pagesRanked = rankedPages.map(p => ({ url: p.url, category: p.category }));
 
+  // Step 2.5: Fallback to homepage if no relevant pages found
   if (rankedPages.length === 0) {
-    console.warn(`[WebScraper] No relevant pages found for ${domain}`);
-    log.result = 'no_relevant_pages';
-    log.error = 'No team/about/contact pages found in site map';
-    log.decisionMakerReason = `No team/about/contact pages found among ${allUrls.length} URLs`;
-    return returnLog ? { contacts: [], log } : [];
+    console.log(`[WebScraper] No team/about/contact pages found, falling back to homepage for ${domain}`);
+    // Find the homepage URL (shortest path, or just the domain)
+    const homepageUrl = allUrls.find(url => {
+      try {
+        const parsed = new URL(url);
+        return parsed.pathname === '/' || parsed.pathname === '';
+      } catch { return false; }
+    }) || `https://${domain}`;
+
+    rankedPages = [{ url: homepageUrl, category: 'HOMEPAGE' }];
+    log.pagesRanked = [{ url: homepageUrl, category: 'HOMEPAGE (fallback)' }];
+    log.homepageFallback = true;
   }
 
   // Step 3: Scrape ALL ranked pages and collect contacts

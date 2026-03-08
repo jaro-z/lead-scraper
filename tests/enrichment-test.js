@@ -16,15 +16,29 @@ const { validateEmail } = require('../enrichment/validators');
 const { assignTemplate } = require('../enrichment/templateRouter');
 const { validateAndExtractDomain } = require('../utils');
 
-const BATCH_SIZE = 35;
+const BATCH_SIZE = process.env.TEST_BATCH_SIZE ? parseInt(process.env.TEST_BATCH_SIZE) : 20;
 const DELAY_BETWEEN = 5000; // 5 seconds between companies to avoid Firecrawl rate limits
+const SKIP_RESET = process.env.SKIP_RESET === 'true'; // Set to true to test NEW companies without resetting
 
-// Decision-maker role patterns (Czech + English)
-const DECISION_MAKER_PATTERNS = /ceo|founder|co-founder|owner|managing director|partner|jednatel|majitel|zakladatel|spolumajitel|ředitel|generální|general director|principal|president/i;
+// Import the isDecisionMaker function that uses Claude's classification
+const { isDecisionMaker: isDecisionMakerFromRouter } = require('../enrichment/templateRouter');
 
-function isDecisionMaker(title) {
-  if (!title) return false;
-  return DECISION_MAKER_PATTERNS.test(title);
+/**
+ * Check if contact is a decision-maker
+ * Now uses Claude's semantic classification (contact.isDecisionMaker field)
+ * Falls back to templateRouter's regex if field not present
+ */
+function isDecisionMaker(contact) {
+  // If contact object has Claude's classification, use it
+  if (typeof contact === 'object' && contact !== null) {
+    if (contact.isDecisionMaker !== undefined) {
+      return contact.isDecisionMaker === true;
+    }
+    // Fall back to regex for title
+    return isDecisionMakerFromRouter(contact.title || contact.role);
+  }
+  // If passed a string (title), use regex
+  return isDecisionMakerFromRouter(contact);
 }
 
 function sleep(ms) {
@@ -36,30 +50,46 @@ async function runTest() {
   console.log(`Date: ${new Date().toISOString()}`);
   console.log('');
 
-  // Step 1: Reset previously enriched companies so we can re-test
-  console.log('Step 1: Resetting previously enriched companies...');
-  db.db.prepare(`
-    UPDATE companies
-    SET enrichment_source = NULL, contacts_count = 0, enrichment_error = NULL, enrichment_log = NULL
-    WHERE enrichment_source IS NOT NULL
-  `).run();
-  db.db.prepare('DELETE FROM contacts').run();
-  console.log('  Reset complete.');
+  // Step 1: Optionally reset previously enriched companies
+  if (SKIP_RESET) {
+    console.log('Step 1: SKIP_RESET=true — Testing NEW companies without resetting previous results');
+  } else {
+    console.log('Step 1: Resetting previously enriched companies...');
+    db.db.prepare(`
+      UPDATE companies
+      SET enrichment_source = NULL, contacts_count = 0, enrichment_error = NULL, enrichment_log = NULL
+      WHERE enrichment_source IS NOT NULL
+    `).run();
+    db.db.prepare('DELETE FROM contacts').run();
+    console.log('  Reset complete.');
+  }
 
   // Step 2: Select test companies (with websites, excluding social media URLs)
+  // If SKIP_RESET, select companies that haven't been tested yet
   console.log(`\nStep 2: Selecting ${BATCH_SIZE} test companies...`);
-  const companies = db.db.prepare(`
-    SELECT id, name, website, address, pipeline_stage
-    FROM companies
-    WHERE website IS NOT NULL
-      AND website != ''
-      AND website NOT LIKE '%facebook.com%'
-      AND website NOT LIKE '%instagram.com%'
-      AND website NOT LIKE '%linkedin.com%'
-      AND website NOT LIKE '%twitter.com%'
-    ORDER BY RANDOM()
-    LIMIT ?
-  `).all(BATCH_SIZE);
+  const query = SKIP_RESET
+    ? `SELECT id, name, website, address, pipeline_stage
+       FROM companies
+       WHERE website IS NOT NULL
+         AND website != ''
+         AND website NOT LIKE '%facebook.com%'
+         AND website NOT LIKE '%instagram.com%'
+         AND website NOT LIKE '%linkedin.com%'
+         AND website NOT LIKE '%twitter.com%'
+         AND (enrichment_source IS NULL OR enrichment_source = '')
+       ORDER BY RANDOM()
+       LIMIT ?`
+    : `SELECT id, name, website, address, pipeline_stage
+       FROM companies
+       WHERE website IS NOT NULL
+         AND website != ''
+         AND website NOT LIKE '%facebook.com%'
+         AND website NOT LIKE '%instagram.com%'
+         AND website NOT LIKE '%linkedin.com%'
+         AND website NOT LIKE '%twitter.com%'
+       ORDER BY RANDOM()
+       LIMIT ?`;
+  const companies = db.db.prepare(query).all(BATCH_SIZE);
 
   console.log(`  Selected ${companies.length} companies with real websites.`);
 
@@ -198,7 +228,8 @@ async function runTest() {
           }
 
           const templateType = assignTemplate(contact.title || contact.role);
-          const isDM = isDecisionMaker(contact.title || contact.role);
+          // Use Claude's semantic classification if available, fallback to regex
+          const isDM = isDecisionMaker(contact);
 
           result.contacts.push({
             name: contact.name || `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
@@ -207,7 +238,9 @@ async function runTest() {
             phone: contact.phone,
             emailValid,
             templateType,
-            isDecisionMaker: isDM
+            isDecisionMaker: isDM,
+            // Track if DM was from Claude or regex for debugging
+            dmSource: contact.isDecisionMaker !== undefined ? 'claude' : 'regex'
           });
 
           // Update contact in DB
@@ -274,14 +307,30 @@ async function runTest() {
   console.log(`| Emails MX-validated        | ${emailValidCount}/${totalEmails} (${totalEmails > 0 ? Math.round(emailValidCount / totalEmails * 100) : 0}%)    |`);
   console.log(`| Errors                     | ${errCount}                 |`);
 
+  // Count DM detection sources
+  const dmBySource = { claude: 0, regex: 0 };
+  for (const r of results) {
+    for (const c of r.contacts) {
+      if (c.isDecisionMaker && c.dmSource) {
+        dmBySource[c.dmSource]++;
+      }
+    }
+  }
+
+  // Count generic email fallbacks
+  const genericFallbacks = results.filter(r =>
+    r.contacts.some(c => c.name === 'General Contact' || c.email?.match(/^(info|kontakt|contact|office|hello)@/i))
+  ).length;
+
   // Step 5: Write detailed results file
   const fs = require('fs');
-  const reportPath = require('path').join(__dirname, '..', 'docs', 'enrichment-test-results.md');
+  const reportPath = require('path').join(__dirname, '..', 'docs', 'enrichment-test-results-v2.md');
 
-  let report = `# Enrichment Test Results — Free Web Scraping Only\n\n`;
+  let report = `# Enrichment Test Results v2 — Improved Pipeline\n\n`;
   report += `**Date**: ${new Date().toISOString()}\n`;
-  report += `**Method**: Free web scraping (Firecrawl + Claude API) — NO Hunter.io\n`;
-  report += `**Sample**: ${tested} Czech companies (marketing/PR/HR/creative agencies)\n\n`;
+  report += `**Method**: Free web scraping (Firecrawl + Claude API) with LLM-based decision-maker detection\n`;
+  report += `**Sample**: ${tested} Czech companies (marketing/PR/HR/creative agencies)\n`;
+  report += `**Test Mode**: ${SKIP_RESET ? 'NEW companies only (SKIP_RESET=true)' : 'Full reset'}\n\n`;
   report += `---\n\n`;
   report += `## Summary\n\n`;
   report += `| Metric | Free Scraping Only |\n`;
@@ -293,6 +342,12 @@ async function runTest() {
   report += `| Would need Hunter fallback | ${hunterFallbackCount} (${Math.round(hunterFallbackCount / withWebsite * 100)}%) |\n`;
   report += `| Emails MX-validated | ${emailValidCount}/${totalEmails} (${totalEmails > 0 ? Math.round(emailValidCount / totalEmails * 100) : 0}%) |\n`;
   report += `| Errors | ${errCount} |\n\n`;
+  report += `### Decision-Maker Detection Source\n\n`;
+  report += `| Source | Count |\n`;
+  report += `|--------|-------|\n`;
+  report += `| Claude LLM | ${dmBySource.claude} |\n`;
+  report += `| Regex fallback | ${dmBySource.regex} |\n`;
+  report += `| Generic email fallbacks | ${genericFallbacks} |\n\n`;
   report += `---\n\n`;
   report += `## Detailed Results\n\n`;
 
@@ -313,7 +368,7 @@ async function runTest() {
       for (const c of r.contacts) {
         report += `  - ${c.name || 'Unknown'} — ${c.title || 'Unknown role'} — ${c.email || 'no email'}`;
         if (c.emailValid) report += ' ✓ MX valid';
-        if (c.isDecisionMaker) report += ' ⭐ DECISION MAKER';
+        if (c.isDecisionMaker) report += ` ⭐ DM (${c.dmSource || 'unknown'})`;
         report += `\n`;
       }
       report += `- **Source**: ${r.source}\n`;
@@ -368,7 +423,12 @@ async function runTest() {
     errCount,
     anyContactRate: Math.round(anyContactCount / withWebsite * 100),
     decisionMakerRate: Math.round(decisionMakerCount / withWebsite * 100),
-    hunterFallbackRate: Math.round(hunterFallbackCount / withWebsite * 100)
+    hunterFallbackRate: Math.round(hunterFallbackCount / withWebsite * 100),
+    // New v2 metrics
+    dmBySource,
+    genericFallbacks,
+    dmFromClaude: dmBySource.claude,
+    dmFromRegex: dmBySource.regex
   };
 }
 
