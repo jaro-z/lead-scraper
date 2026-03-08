@@ -31,17 +31,38 @@ const ROLE_TEMPLATES = {
 };
 
 /**
- * Pattern to identify decision-makers (CEO/founder level contacts)
- * Used for flagging high-priority contacts
+ * Check if a contact is a decision-maker
+ * Prefers Claude's classification (isDecisionMaker field), falls back to role patterns
+ *
+ * @param {Object|string} contactOrRole - Either a contact object with isDecisionMaker field, or a role string
+ * @returns {boolean} True if this is a decision-maker
+ */
+function isDecisionMaker(contactOrRole) {
+  // If passed a contact object with Claude's classification, use that
+  if (typeof contactOrRole === 'object' && contactOrRole !== null) {
+    if (contactOrRole.isDecisionMaker !== undefined) {
+      return contactOrRole.isDecisionMaker === true;
+    }
+    // Fall back to checking role
+    return isDecisionMakerRole(contactOrRole.role || contactOrRole.title);
+  }
+
+  // If passed a string (role), check it
+  return isDecisionMakerRole(contactOrRole);
+}
+
+/**
+ * Fallback regex pattern for role-based decision-maker detection
+ * Only used when Claude's classification is not available
  */
 const DECISION_MAKER_PATTERN = /\b(ceo|founder|co-founder|cofounder|owner|director|partner|managing|president|principal|board|vedení|management|jednatel|majitel|zakladatel|ředitel|ředitelka|společník|spolumajitel|chief|head)\b/i;
 
 /**
- * Check if a role/title indicates a decision-maker
+ * Check if a role string indicates a decision-maker (fallback)
  * @param {string} role - Job title/role
  * @returns {boolean} True if this is a decision-maker role
  */
-function isDecisionMaker(role) {
+function isDecisionMakerRole(role) {
   if (!role) return false;
   return DECISION_MAKER_PATTERN.test(role);
 }
@@ -89,6 +110,7 @@ function assignTemplatesBatch(contacts) {
 module.exports = {
   assignTemplate,
   isDecisionMaker,
+  isDecisionMakerRole,
   ROLE_TEMPLATES,
   DECISION_MAKER_PATTERN,
   getTemplateTypes,

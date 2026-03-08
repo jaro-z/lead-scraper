@@ -254,39 +254,36 @@ async function extractContactsWithClaude(html, options = {}) {
         role: 'user',
         content: `Extract team contacts from this company website.
 
-PRIORITY ORDER - List contacts in this order of importance:
-1. CEO / Owner / Founder / Majitel / Jednatel / Zakladatel / Managing Director (HIGHEST)
-2. COO / CFO / CTO / CMO / Directors / Ředitel / Partner / Management / Vedení
-3. Managers and other team members
-
-CRITICAL: Extract EVERY person visible. Do not stop after finding one.
-
-Look for:
-- People with photos, headshots, or profile cards
-- People with job titles (including "Company management", "Vedení firmy", etc.)
-- Anyone with email or phone shown
-- Contact cards, team grids, footer sections
-- Management/leadership sections
-
-For each person, extract:
+For each person found, extract:
 - name: Full name
-- role: Job title (keep original language, include department if no title)
-- email: Email (or null) - include ALL emails, even generic ones like info@
-- phone: Phone (or null)
+- role: Job title (keep original language)
+- email: Email address (or null)
+- phone: Phone number (or null)
+- isDecisionMaker: true/false - Is this person a decision-maker who can authorize purchases?
 
-IMPORTANT role detection:
-- "Company management" / "Vedení společnosti" = decision maker
-- "Managing" / "Director" / "Partner" = decision maker
-- "Jednatel" / "Majitel" / "Ředitel" = decision maker (Czech titles)
+DECISION-MAKER CRITERIA (isDecisionMaker = true):
+- C-level executives (CEO, COO, CFO, CTO, CMO, etc.)
+- Founders, owners, co-founders
+- Directors, managing directors, board members
+- Partners, principals, presidents
+- Anyone in "management", "leadership", "vedení" (Czech)
+- Czech titles: jednatel, majitel, ředitel, zakladatel, společník
+- Department heads if they have budget authority
 
-Rules:
-- Include ALL people visible
-- Include ALL emails found (we'll filter later)
-- Czech: jednatel=statutory director, majitel=owner, ředitel=CEO/director
-- Return sorted by PRIORITY above (CEO/owner first)
+NOT decision-makers (isDecisionMaker = false):
+- Individual contributors (developers, designers, copywriters)
+- Specialists, consultants, assistants
+- Junior/entry-level roles
+- Support staff
+
+EXTRACTION RULES:
+1. Extract EVERY person visible on the page
+2. Include ALL emails found (even generic like info@)
+3. Sort by importance: decision-makers first
+4. Keep job titles in their original language
 
 Return ONLY a JSON array:
-[{"name": "Petr Novák", "role": "CEO", "email": "petr@company.cz", "phone": "+420123456789"}]
+[{"name": "Petr Novák", "role": "CEO", "email": "petr@company.cz", "phone": "+420123456789", "isDecisionMaker": true}]
 
 Return [] if no people found.
 
@@ -316,7 +313,9 @@ ${truncatedHtml}`
         email: keepGeneric
           ? sanitizeEmail(contact.email)
           : filterGenericEmail(contact.email),
-        phone: sanitizeContactField(contact.phone)
+        phone: sanitizeContactField(contact.phone),
+        // Claude determines if this person is a decision-maker (can authorize purchases)
+        isDecisionMaker: contact.isDecisionMaker === true
       }))
       .filter(contact => contact.name);
 
@@ -556,14 +555,15 @@ function deduplicateContacts(contacts) {
  * @returns {Object} Merged contact
  */
 function mergeContacts(a, b) {
-  // Prefer the role that's more specific (longer or has decision-maker keywords)
+  // Prefer the role from whichever contact is marked as decision-maker
+  // Otherwise prefer the longer/more specific role
   let role = a.role || b.role;
   if (a.role && b.role) {
-    // Prefer role with decision-maker keywords
-    const dmPattern = /ceo|founder|owner|director|partner|ředitel|jednatel|majitel/i;
-    if (dmPattern.test(b.role) && !dmPattern.test(a.role)) {
+    if (b.isDecisionMaker && !a.isDecisionMaker) {
       role = b.role;
-    } else if (b.role.length > a.role.length && !dmPattern.test(a.role)) {
+    } else if (a.isDecisionMaker && !b.isDecisionMaker) {
+      role = a.role;
+    } else if (b.role.length > a.role.length) {
       role = b.role;
     }
   }
@@ -573,6 +573,8 @@ function mergeContacts(a, b) {
     role: role,
     email: a.email || b.email,
     phone: a.phone || b.phone,
+    // Either contact being a decision-maker means the merged one is
+    isDecisionMaker: a.isDecisionMaker || b.isDecisionMaker,
     // Preserve any additional fields
     ...(a.email_valid !== undefined && { email_valid: a.email_valid || b.email_valid }),
     ...(a.phone_valid !== undefined && { phone_valid: a.phone_valid || b.phone_valid })
@@ -751,12 +753,12 @@ async function scrapeTeamPages(domain, options = {}) {
     log.error = 'No contacts or emails found on any scraped page';
   }
 
-  // Step 7: Check for decision-makers and log why if not found
-  const dmPattern = /\b(ceo|founder|co-founder|owner|director|partner|managing|president|principal|vedení|management|jednatel|majitel|zakladatel|ředitel)\b/i;
-  const decisionMakers = finalContacts.filter(c => c.role && dmPattern.test(c.role));
+  // Step 7: Check for decision-makers (using Claude's classification, not regex)
+  const decisionMakers = finalContacts.filter(c => c.isDecisionMaker === true);
 
   if (decisionMakers.length > 0) {
     log.decisionMakerFound = true;
+    log.decisionMakersCount = decisionMakers.length;
     console.log(`[WebScraper] Decision-maker found: ${decisionMakers[0].name} (${decisionMakers[0].role})`);
   } else {
     log.decisionMakerFound = false;
@@ -764,7 +766,7 @@ async function scrapeTeamPages(domain, options = {}) {
     const pagesScrapedStr = log.pagesScraped.map(p => p.url).join(', ');
     const rolesFound = log.contactsRaw.map(c => c.role).filter(Boolean);
     if (rolesFound.length > 0) {
-      log.decisionMakerReason = `No CEO/founder/director titles found. Roles seen: ${[...new Set(rolesFound)].slice(0, 5).join(', ')}. Pages scraped: ${pagesScrapedStr}`;
+      log.decisionMakerReason = `Claude found no decision-makers among ${finalContacts.length} contacts. Roles seen: ${[...new Set(rolesFound)].slice(0, 5).join(', ')}. Pages scraped: ${pagesScrapedStr}`;
     } else if (log.contactsRaw.length > 0) {
       log.decisionMakerReason = `Found ${log.contactsRaw.length} contacts but no job titles extracted. Pages scraped: ${pagesScrapedStr}`;
     } else {
