@@ -12,9 +12,11 @@ const { validateEmail, validatePhone } = require('./validators');
 const { sanitizeContactField } = require('../utils');
 
 // Initialize Firecrawl (uses FIRECRAWL_API_KEY env var)
-const firecrawl = new FirecrawlApp({
+// SDK v4+ puts methods on .v1 property
+const _firecrawlApp = new FirecrawlApp({
   apiKey: process.env.FIRECRAWL_API_KEY
 });
+const firecrawl = _firecrawlApp.v1 || _firecrawlApp;
 
 // Initialize Anthropic client (uses ANTHROPIC_API_KEY env var)
 const anthropic = new Anthropic();
