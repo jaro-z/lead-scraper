@@ -1826,6 +1826,7 @@ header h1 {
 .custom-select-trigger {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   height: 36px;
   padding: 0 12px;
@@ -1837,9 +1838,6 @@ header h1 {
   min-width: 120px;
   max-width: 200px;
   color: #374151;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .custom-select-trigger:hover {
@@ -1851,6 +1849,7 @@ header h1 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
 }
 
 .custom-select-trigger svg {

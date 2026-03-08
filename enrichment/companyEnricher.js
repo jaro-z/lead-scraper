@@ -79,14 +79,18 @@ async function enrichCompany(domain) {
 
 Extract the following:
 1. IČO (Czech company registration number) - exactly 8 digits, often shown in footer or contact page
-2. Segment - be SPECIFIC and GRANULAR. Examples: "SEO Agency", "PPC Agency", "Web Development Agency", "B2B SaaS CRM", "E-commerce Fashion", "Legal Services", "Accounting Firm". Never use generic terms like just "Agency" or "SaaS".
-3. Industry - specific industry (e.g., "Digital Marketing", "Software Development", "Food Production")
-4. Description - ONE sentence (max 15 words) describing what this company does. Example: "B2B SaaS platform for restaurant inventory management"
-5. Size - estimate based on team size or company presence: small (<10 employees), medium (10-50), large (50+)
-6. Services - list of main services or products offered (max 5 items)
+2. Segment - use BROAD categories only, pick ONE from these examples:
+   - For agencies: "Performance Marketing", "Brand Marketing", "Web Development", "Creative Agency", "PR & Media"
+   - For software: "B2B SaaS", "B2C App", "E-commerce Platform", "Dev Tools"
+   - For services: "Consulting", "Legal", "Accounting", "Recruitment"
+   DO NOT create variations like "Brand Strategy Agency" vs "Brand Marketing Agency" - use the broad category.
+3. Industry - broad industry (e.g., "Marketing", "Software", "Finance", "Healthcare")
+4. Description - ONE sentence (max 15 words) describing what this company does
+5. Size - estimate: small (<10), medium (10-50), large (50+)
+6. Services - list of main services (max 5 items)
 
-Return ONLY valid JSON in this exact format, no other text:
-{"ico": "12345678", "segment": "SEO Agency", "industry": "Digital Marketing", "description": "Full-service SEO agency specializing in e-commerce and SaaS clients", "size": "small", "services": ["Technical SEO", "Content strategy", "Link building"]}
+Return ONLY valid JSON:
+{"ico": "12345678", "segment": "Performance Marketing", "industry": "Marketing", "description": "PPC and SEO agency for e-commerce brands", "size": "small", "services": ["Google Ads", "SEO", "Analytics"]}
 
 If IČO is not found, use null for ico field.
 
