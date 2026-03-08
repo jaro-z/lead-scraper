@@ -327,6 +327,33 @@ async function loadCompanies(searchId) {
   }
 }
 
+async function loadSegments() {
+  try {
+    const res = await fetch('/api/segments');
+    const segments = await res.json();
+
+    const dropdown = document.getElementById('segment-filter-dropdown');
+    // Keep the "All" option, remove dynamically added ones
+    const allOption = dropdown.querySelector('[data-value=""]');
+
+    // Clear existing dynamic options
+    dropdown.innerHTML = '';
+    dropdown.appendChild(allOption);
+
+    // Add segments from database
+    segments.forEach(segment => {
+      const btn = document.createElement('button');
+      btn.className = 'custom-select-option';
+      btn.dataset.value = segment;
+      btn.textContent = segment;
+      btn.addEventListener('click', () => selectSegment(btn));
+      dropdown.appendChild(btn);
+    });
+  } catch (error) {
+    console.error('Error loading segments:', error);
+  }
+}
+
 // ============ Render Functions ============
 
 function renderSearches(searches) {
@@ -550,6 +577,7 @@ async function showResults(searchId) {
 
   await loadCompanies(searchId);
   await updatePipelineStats();
+  await loadSegments();
 }
 
 function showDashboard() {
@@ -1504,7 +1532,7 @@ function updateMainActionButton() {
 
   // Require checkbox selection for all actions
   if (selectedCount === 0) {
-    btnText.textContent = 'Select leads to enrich';
+    btnText.textContent = 'Enrich';
     btn.disabled = true;
     btn.dataset.action = 'none';
     return;
