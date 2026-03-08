@@ -501,9 +501,10 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
     contactResult = await discoverContacts(company.id, domain, HUNTER_API_KEY);
     const contacts = contactResult.contacts || [];
 
-    // Save ALL contacts at once to avoid delete-then-insert bug
-    if (contacts.length > 0) {
-      db.saveContacts(company.id, formatContactsForDB(contacts));
+    // Save only contacts with emails (DB requires email NOT NULL)
+    const contactsWithEmail = contacts.filter(c => c.email);
+    if (contactsWithEmail.length > 0) {
+      db.saveContacts(company.id, formatContactsForDB(contactsWithEmail));
     }
 
     // Now process each contact (validate email, assign template) without re-saving

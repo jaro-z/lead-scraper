@@ -17,7 +17,7 @@ const { assignTemplate } = require('../enrichment/templateRouter');
 const { validateAndExtractDomain } = require('../utils');
 
 const BATCH_SIZE = 35;
-const DELAY_BETWEEN = 3000; // 3 seconds between companies to avoid rate limits
+const DELAY_BETWEEN = 5000; // 5 seconds between companies to avoid Firecrawl rate limits
 
 // Decision-maker role patterns (Czech + English)
 const DECISION_MAKER_PATTERNS = /ceo|founder|co-founder|owner|managing director|partner|jednatel|majitel|zakladatel|spolumajitel|ředitel|generální|general director|principal|president/i;
@@ -168,17 +168,20 @@ async function runTest() {
 
       // Step 3c: Process contacts
       if (contacts.length > 0) {
-        // Save all contacts at once
-        const dbContacts = contacts.map((c, idx) => ({
-          email: c.email,
-          firstName: c.firstName,
-          lastName: c.lastName,
-          fullName: c.name,
-          title: c.title,
-          isPrimary: idx === 0,
-          confidence: c.confidence || 50
-        }));
-        db.saveContacts(company.id, dbContacts);
+        // Save only contacts with emails (DB requires email NOT NULL)
+        const contactsWithEmail = contacts.filter(c => c.email);
+        if (contactsWithEmail.length > 0) {
+          const dbContacts = contactsWithEmail.map((c, idx) => ({
+            email: c.email,
+            firstName: c.firstName,
+            lastName: c.lastName,
+            fullName: c.name,
+            title: c.title,
+            isPrimary: idx === 0,
+            confidence: c.confidence || 50
+          }));
+          db.saveContacts(company.id, dbContacts);
+        }
 
         // Validate emails and assign templates
         for (const contact of contacts) {

@@ -27,7 +27,9 @@ const PAGE_CATEGORIES = ['TEAM', 'CONTACT', 'ABOUT'];
 // Generic email prefixes to filter out (not personal contacts)
 const GENERIC_EMAIL_PREFIXES = [
   'info@', 'kontakt@', 'contact@', 'office@', 'support@',
-  'sales@', 'hello@', 'obchod@', 'noreply@'
+  'sales@', 'hello@', 'obchod@', 'noreply@', 'chci@', 'poptavka@',
+  'recepce@', 'fakturace@', 'admin@', 'marketing@', 'hr@', 'jobs@',
+  'kariera@', 'press@', 'media@'
 ];
 
 
@@ -286,7 +288,14 @@ function extractEmailsFromHtml(html) {
   const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
   const matches = html.match(emailRegex) || [];
 
-  return [...new Set(matches)].filter(email => !isGenericEmail(email));
+  return [...new Set(matches)].filter(email => {
+    if (isGenericEmail(email)) return false;
+    // Filter out image/file references with @ (e.g., logo@2x.png)
+    if (/\.(png|jpg|jpeg|gif|svg|webp|ico|css|js)$/i.test(email)) return false;
+    // Filter out obviously fake/placeholder emails
+    if (/example\.|test@|placeholder|jmenujise@/i.test(email)) return false;
+    return true;
+  });
 }
 
 /**
