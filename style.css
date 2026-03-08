@@ -2053,6 +2053,10 @@ header h1 {
   color: #EF4444;
 }
 
+.status-warning {
+  color: #F59E0B;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }

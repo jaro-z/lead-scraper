@@ -395,7 +395,7 @@ function renderCompanies() {
   }
 
   resultsBody.innerHTML = sorted.map(c => {
-    const status = rowStatuses.get(c.id) || { text: formatStageStatus(c.pipeline_stage), state: 'idle' };
+    const status = rowStatuses.get(c.id) || { text: formatStageStatus(c.pipeline_stage, c.enrichment_error), state: c.enrichment_error ? 'warning' : 'idle' };
     return `
     <tr data-id="${c.id}">
       <td><input type="checkbox" class="row-checkbox" ${selectedIds.has(c.id) ? 'checked' : ''}></td>
@@ -1448,9 +1448,15 @@ function formatSegmentBadge(segment, enrichmentSource) {
   return `<span class="segment-badge ${segmentClass}">${escapeHtml(segment)}</span>`;
 }
 
-function formatStageStatus(stage) {
+function formatStageStatus(stage, enrichmentError) {
+  // Handle enrichment error
+  if (enrichmentError === 'no_contacts') {
+    return '<span class="enrichment-error-badge">No contacts</span>';
+  }
+
   const stageLabels = {
     raw: 'Raw',
+    no_website: 'No Website',
     enriched: 'Enriched',
     qualified: 'Qualified',
     ready: 'Ready'
