@@ -224,7 +224,11 @@ function normalizeWebScraperContact(contact) {
     phone: contact.phone || null,
     title: contact.role || contact.title || null,
     source: 'web_scrape',
-    confidence: contact.confidence || DEFAULT_CONFIDENCE.web_scrape
+    confidence: contact.confidence || DEFAULT_CONFIDENCE.web_scrape,
+    // Preserve Claude's decision-maker classification
+    isDecisionMaker: contact.isDecisionMaker === true,
+    // Preserve generic fallback flag
+    isGenericFallback: contact.isGenericFallback === true
   };
 }
 

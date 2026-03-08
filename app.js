@@ -1559,17 +1559,22 @@ function updateMainActionButton() {
 function updatePushNotionButton() {
   const btn = document.getElementById('push-notion-btn');
   const countSpan = document.getElementById('notion-count');
-  const selectedCount = selectedIds.size;
 
-  // Only enable when leads are selected
-  if (selectedCount > 0) {
+  // Count selected companies that can be pushed (qualified or ready, not already in Notion)
+  const selectedCompanies = companies.filter(c => selectedIds.has(c.id));
+  const pushableCount = selectedCompanies.filter(c =>
+    (c.pipeline_stage === 'qualified' || c.pipeline_stage === 'ready') && !c.in_notion
+  ).length;
+
+  // Only enable when there are pushable leads selected
+  if (pushableCount > 0) {
     btn.disabled = false;
-    countSpan.textContent = `(${selectedCount})`;
-    btn.title = `Push ${selectedCount} leads to Notion`;
+    countSpan.textContent = `(${pushableCount})`;
+    btn.title = `Push ${pushableCount} qualified leads to Notion`;
   } else {
     btn.disabled = true;
     countSpan.textContent = '';
-    btn.title = 'Select leads first';
+    btn.title = selectedIds.size > 0 ? 'No qualified leads selected' : 'Select leads first';
   }
 }
 

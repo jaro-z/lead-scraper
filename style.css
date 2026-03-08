@@ -1971,10 +1971,11 @@ header h1 {
 /* Main action in toolbar */
 .unified-toolbar .btn-main-action {
   height: 36px;
-  padding: 0 16px;
+  padding: 0 20px;
   font-size: 13px;
   margin-left: auto;
-  min-width: auto;
+  min-width: 140px;
+  white-space: nowrap;
 }
 
 /* Responsive: Stack on narrow screens */
