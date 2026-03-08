@@ -501,9 +501,45 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
     contactResult = await discoverContacts(company.id, domain, HUNTER_API_KEY);
     const contacts = contactResult.contacts || [];
 
+    // Save ALL contacts at once to avoid delete-then-insert bug
+    if (contacts.length > 0) {
+      db.saveContacts(company.id, formatContactsForDB(contacts));
+    }
+
+    // Now process each contact (validate email, assign template) without re-saving
     for (let i = 0; i < contacts.length; i++) {
-      const processed = await processContact(contacts[i], i, company.id, contactResult.source);
-      result.contacts.push(processed);
+      const contact = contacts[i];
+      let emailValidation = null;
+
+      if (contact.email) {
+        try {
+          emailValidation = await validateEmail(contact.email);
+        } catch {
+          emailValidation = { valid: false, reason: 'validation_error' };
+        }
+      }
+
+      const templateType = assignTemplate(contact.title || contact.role);
+
+      // Update the already-saved contact with validation and template data
+      const dbContacts = db.getContactsByCompany(company.id);
+      const dbContact = dbContacts.find(c => c.email === contact.email);
+      if (dbContact) {
+        db.updateContactValidation(dbContact.id, {
+          email_valid: emailValidation?.valid || false,
+          email_validated_at: new Date().toISOString(),
+          template_type: templateType,
+          source: contactResult.source || 'unknown',
+          phone: contact.phone || null
+        });
+      }
+
+      result.contacts.push({
+        ...contact,
+        email_valid: emailValidation?.valid || false,
+        template_type: templateType,
+        source: contactResult.source
+      });
     }
   });
 
