@@ -1809,11 +1809,21 @@ function getContactTier(company) {
   if (!company.primary_email) return 'none';
 
   const email = company.primary_email.toLowerCase();
-  const genericPrefixes = ['info@', 'kontakt@', 'contact@', 'office@', 'support@', 'sales@', 'hello@', 'obchod@', 'noreply@', 'poptavka@', 'recepce@', 'fakturace@', 'admin@', 'marketing@', 'webmaster@', 'general@', 'team@'];
-  if (genericPrefixes.some(p => email.startsWith(p))) return 'generic';
 
+  // Check for CEO/founder titles first (highest priority)
   const title = (company.primary_contact_title || '').toLowerCase();
   if (/\b(ceo|founder|co-founder|owner|director|managing|president|jednatel|majitel|zakladatel|ředitel|společník|partner)\b/.test(title)) return 'ceo';
+
+  // Check if there's a real person's name associated (not "General Contact")
+  // If a person is associated with a generic email, show as "named" not "generic"
+  const hasPersonName = company.primary_contact_first_name &&
+                        company.primary_contact_first_name !== 'General' &&
+                        company.primary_contact_first_name.trim().length > 0;
+  if (hasPersonName) return 'named';
+
+  // Only mark as generic if no person name is associated
+  const genericPrefixes = ['info@', 'kontakt@', 'contact@', 'office@', 'support@', 'sales@', 'hello@', 'obchod@', 'noreply@', 'poptavka@', 'recepce@', 'fakturace@', 'admin@', 'marketing@', 'webmaster@', 'general@', 'team@'];
+  if (genericPrefixes.some(p => email.startsWith(p))) return 'generic';
 
   return 'named';
 }
@@ -1899,10 +1909,22 @@ async function showTierPopover(companyId, badgeEl) {
 function getContactTierFromContact(contact) {
   if (!contact.email) return 'none';
   const email = contact.email.toLowerCase();
-  const genericPrefixes = ['info@', 'kontakt@', 'contact@', 'office@', 'support@', 'sales@', 'hello@', 'webmaster@', 'general@', 'team@'];
-  if (genericPrefixes.some(p => email.startsWith(p))) return 'generic';
+
+  // Check for CEO/founder titles first (highest priority)
   const title = (contact.title || '').toLowerCase();
   if (/\b(ceo|founder|co-founder|owner|director|managing|president|jednatel|majitel|zakladatel|ředitel|společník|partner)\b/.test(title)) return 'ceo';
+
+  // Check if there's a real person's name (not "General Contact")
+  const firstName = contact.first_name || '';
+  const fullName = contact.full_name || '';
+  const hasPersonName = (firstName && firstName !== 'General' && firstName.trim().length > 0) ||
+                        (fullName && !fullName.toLowerCase().includes('general contact') && fullName.trim().length > 0);
+  if (hasPersonName) return 'named';
+
+  // Only mark as generic if no person name is associated
+  const genericPrefixes = ['info@', 'kontakt@', 'contact@', 'office@', 'support@', 'sales@', 'hello@', 'webmaster@', 'general@', 'team@'];
+  if (genericPrefixes.some(p => email.startsWith(p))) return 'generic';
+
   return 'named';
 }
 
