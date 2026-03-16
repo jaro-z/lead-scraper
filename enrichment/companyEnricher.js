@@ -79,11 +79,9 @@ async function enrichCompany(domain) {
 
 Extract the following:
 1. IČO (Czech company registration number) - exactly 8 digits, often shown in footer or contact page
-2. Segment - use BROAD categories only, pick ONE from these examples:
-   - For agencies: "Performance Marketing", "Brand Marketing", "Web Development", "Creative Agency", "PR & Media"
-   - For software: "B2B SaaS", "B2C App", "E-commerce Platform", "Dev Tools"
-   - For services: "Consulting", "Legal", "Accounting", "Recruitment"
-   DO NOT create variations like "Brand Strategy Agency" vs "Brand Marketing Agency" - use the broad category.
+2. Segment - pick EXACTLY ONE from this list (no variations, no additions):
+   "Performance Marketing", "Brand Marketing", "Web Development", "Creative Agency", "PR & Media", "Full-Service Marketing", "Consulting", "Other"
+   Use "Other" only if none of the above fit at all.
 3. Industry - broad industry (e.g., "Marketing", "Software", "Finance", "Healthcare")
 4. Description - ONE sentence (max 15 words) describing what this company does
 5. Size - estimate: small (<10), medium (10-50), large (50+)

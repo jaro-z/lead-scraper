@@ -13,6 +13,7 @@
 
 const webScraper = require('./webScraper');
 const hunter = require('../hunter');
+const { removeDiacritics } = require('../utils');
 
 // Default confidence scores by source
 const DEFAULT_CONFIDENCE = {
@@ -35,13 +36,15 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
     contactsChecked: 0,
     emailsRecovered: 0,
     patternsGenerated: 0,
+    patternDerived: null,
     errors: []
   };
 
-  if (!hunterApiKey) {
-    log.skipped = true;
-    log.reason = 'no_api_key';
-    return { contacts, emailsRecovered: 0, log };
+  // Step 0: Derive email pattern from contacts that already have emails (FREE)
+  const derivedPattern = derivePatternFromExistingContacts(contacts, domain);
+  if (derivedPattern) {
+    log.patternDerived = derivedPattern;
+    console.log(`[Waterfall] Derived email pattern from existing contacts: ${derivedPattern.pattern} (${derivedPattern.matches} matches)`);
   }
 
   const enrichedContacts = [];
@@ -53,38 +56,85 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
       continue;
     }
 
-    // Skip contacts without names (can't look them up)
+    // Skip contacts without any name at all
     if (!contact.name && !contact.firstName) {
       enrichedContacts.push(contact);
       continue;
     }
 
+    const hasFirstNameOnly = (contact.firstName || contact.name) && !contact.lastName;
     log.contactsChecked++;
 
     try {
-      const result = await hunter.findEmailForContact(contact, domain, hunterApiKey);
-
-      if (result.email) {
-        // Found email via Hunter!
+      // Try derived pattern first (FREE, no API call)
+      const patternEmail = applyDerivedPattern(derivedPattern, contact, domain);
+      if (patternEmail) {
         log.emailsRecovered++;
-        enrichedContacts.push({
-          ...contact,
-          email: result.email,
-          confidence: result.confidence || DEFAULT_CONFIDENCE.hunter_finder,
-          source: 'hunter_finder',
-          emailSource: 'hunter_finder'
-        });
-        console.log(`[Waterfall] Recovered email for ${contact.name}: ${result.email}`);
-      } else if (result.patterns && result.patterns.length > 0) {
-        // No email found, but we have pattern suggestions
         log.patternsGenerated++;
         enrichedContacts.push({
           ...contact,
-          suggestedEmails: result.patterns,
-          emailSource: 'pattern_suggestions'
+          email: patternEmail,
+          confidence: derivedPattern.matches >= 2 ? 45 : 25,
+          source: 'pattern_derived',
+          emailSource: 'pattern_derived'
         });
-      } else {
+        console.log(`[Waterfall] Generated email from derived pattern for ${contact.name || contact.firstName}: ${patternEmail}`);
+        continue;
+      }
+
+      // Fallback to Hunter API
+      if (!hunterApiKey) {
         enrichedContacts.push(contact);
+        continue;
+      }
+
+      // Branch A: Contact has first AND last name → use Hunter email-finder
+      if (!hasFirstNameOnly) {
+        const result = await hunter.findEmailForContact(contact, domain, hunterApiKey);
+
+        if (result.email) {
+          log.emailsRecovered++;
+          enrichedContacts.push({
+            ...contact,
+            email: result.email,
+            confidence: result.confidence || DEFAULT_CONFIDENCE.hunter_finder,
+            source: 'hunter_finder',
+            emailSource: 'hunter_finder'
+          });
+          console.log(`[Waterfall] Recovered email for ${contact.name}: ${result.email}`);
+        } else if (result.patterns && result.patterns.length > 0) {
+          log.patternsGenerated++;
+          enrichedContacts.push({
+            ...contact,
+            suggestedEmails: result.patterns,
+            emailSource: 'pattern_suggestions'
+          });
+        } else {
+          enrichedContacts.push(contact);
+        }
+      }
+      // Branch B: Contact has FIRST NAME ONLY → use domain pattern approach
+      else {
+        const firstName = contact.firstName || contact.name;
+        console.log(`[Waterfall] First-name-only contact: "${firstName}" - trying pattern generation for ${domain}`);
+
+        const patternResult = await hunter.generateEmailFromFirstName(firstName, domain, hunterApiKey);
+
+        if (patternResult.email) {
+          log.emailsRecovered++;
+          log.firstNamePatterns = (log.firstNamePatterns || 0) + 1;
+          enrichedContacts.push({
+            ...contact,
+            email: patternResult.email,
+            confidence: patternResult.confidence,
+            source: 'first_name_pattern',
+            emailSource: 'first_name_pattern',
+            suggestedEmails: patternResult.candidates
+          });
+          console.log(`[Waterfall] Generated email for first-name "${firstName}": ${patternResult.email} (confidence: ${patternResult.confidence})`);
+        } else {
+          enrichedContacts.push(contact);
+        }
       }
     } catch (error) {
       log.errors.push({ name: contact.name, error: error.message });
@@ -97,6 +147,76 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
     emailsRecovered: log.emailsRecovered,
     log
   };
+}
+
+/**
+ * Derive email pattern from contacts that already have emails.
+ * Looks at existing emails like martin@domain.cz and petra@domain.cz
+ * to detect the pattern is {first}@domain.cz
+ */
+function derivePatternFromExistingContacts(contacts, domain) {
+  const domainLower = domain.toLowerCase();
+  const contactsWithEmail = contacts.filter(c => {
+    if (!c.email || !c.firstName) return false;
+    const emailDomain = c.email.split('@')[1];
+    return emailDomain && emailDomain.toLowerCase() === domainLower;
+  });
+
+  if (contactsWithEmail.length === 0) return null;
+
+  const patterns = { '{first}': 0, '{first}.{last}': 0, '{f}{last}': 0, '{first}{last}': 0 };
+
+  for (const c of contactsWithEmail) {
+    const local = c.email.split('@')[0].toLowerCase();
+    const first = removeDiacritics(c.firstName || '');
+    const last = removeDiacritics(c.lastName || '');
+
+    if (!first) continue;
+
+    if (local === first) patterns['{first}']++;
+    if (last && local === `${first}.${last}`) patterns['{first}.{last}']++;
+    if (last && local === `${first[0]}${last}`) patterns['{f}{last}']++;
+    if (last && local === `${first}${last}`) patterns['{first}{last}']++;
+  }
+
+  // Find the best matching pattern
+  let bestPattern = null;
+  let bestCount = 0;
+  for (const [pattern, count] of Object.entries(patterns)) {
+    if (count > bestCount) {
+      bestPattern = pattern;
+      bestCount = count;
+    }
+  }
+
+  if (bestCount === 0) return null;
+
+  return { pattern: bestPattern, matches: bestCount };
+}
+
+/**
+ * Apply a derived pattern to generate an email for a contact without one.
+ */
+function applyDerivedPattern(derivedPattern, contact, domain) {
+  if (!derivedPattern) return null;
+
+  const first = removeDiacritics(contact.firstName || contact.name || '');
+  const last = removeDiacritics(contact.lastName || '');
+
+  if (!first) return null;
+
+  switch (derivedPattern.pattern) {
+    case '{first}':
+      return `${first}@${domain}`;
+    case '{first}.{last}':
+      return last ? `${first}.${last}@${domain}` : null;
+    case '{f}{last}':
+      return last ? `${first[0]}${last}@${domain}` : null;
+    case '{first}{last}':
+      return last ? `${first}${last}@${domain}` : null;
+    default:
+      return null;
+  }
 }
 
 /**
@@ -130,7 +250,7 @@ async function discoverContacts(companyId, domain, hunterApiKey) {
     const scrapedContacts = scrapeResult.contacts || [];
     log.webScrape = scrapeResult.log;
 
-    if (scrapedContacts && scrapedContacts.length > 0) {
+    if (scrapedContacts.length > 0) {
       console.log(`[Waterfall] Found ${scrapedContacts.length} contacts via web scrape for ${cleanDomain}`);
 
       // Normalize contacts first
@@ -146,6 +266,39 @@ async function discoverContacts(companyId, domain, hunterApiKey) {
 
         if (enrichResult.emailsRecovered > 0) {
           console.log(`[Waterfall] Recovered ${enrichResult.emailsRecovered} emails via Hunter email-finder`);
+        }
+      }
+
+      // Step 1.7: If we only have generic emails (no personal emails), try Hunter for decision-makers
+      const hasPersonalEmail = normalizedContacts.some(c => c.email && !c.isGenericFallback);
+      const onlyGenericEmails = !hasPersonalEmail && normalizedContacts.some(c => c.isGenericFallback);
+
+      if (onlyGenericEmails && hunterApiKey) {
+        console.log(`[Waterfall] Only generic emails found - searching Hunter for decision-makers at ${cleanDomain}`);
+        try {
+          const dmResult = await hunter.searchDecisionMakers(cleanDomain, hunterApiKey);
+          log.decisionMakerSearch = { found: dmResult.contacts.length, pattern: dmResult.pattern };
+
+          if (dmResult.contacts.length > 0) {
+            // Add decision-maker contacts from Hunter alongside existing contacts
+            const dmNormalized = dmResult.contacts.map(c => ({
+              name: c.fullName || null,
+              firstName: c.firstName || null,
+              lastName: c.lastName || null,
+              email: c.email || null,
+              phone: null,
+              title: c.title || null,
+              source: 'hunter_dm_search',
+              confidence: c.confidence || 60,
+              isDecisionMaker: c.isDecisionMaker || false,
+              isGenericFallback: false
+            }));
+            normalizedContacts = [...dmNormalized, ...normalizedContacts];
+            console.log(`[Waterfall] Added ${dmResult.contacts.length} decision-maker(s) from Hunter for ${cleanDomain}`);
+          }
+        } catch (dmError) {
+          console.warn(`[Waterfall] Decision-maker search failed for ${cleanDomain}:`, dmError.message);
+          log.decisionMakerSearch = { error: dmError.message };
         }
       }
 
@@ -190,9 +343,27 @@ async function discoverContacts(companyId, domain, hunterApiKey) {
     log.hunter = { skipped: true, reason: 'no_api_key' };
   }
 
-  // No contacts found
-  console.log(`[Waterfall] No contacts found for ${cleanDomain}`);
-  return { source: null, contacts: [], companyId, log };
+  // Step 3: Last resort - generate info@domain as tier-3 fallback
+  console.log(`[Waterfall] No contacts found for ${cleanDomain}, generating info@ fallback`);
+  log.source = 'generic_fallback';
+  log.genericFallback = true;
+  return {
+    source: 'generic_fallback',
+    contacts: [{
+      name: 'General Contact',
+      firstName: null,
+      lastName: null,
+      email: `info@${cleanDomain}`,
+      phone: null,
+      title: 'Company Email',
+      source: 'generic_fallback',
+      confidence: 10,
+      isDecisionMaker: false,
+      isGenericFallback: true
+    }],
+    companyId,
+    log
+  };
 }
 
 /**
@@ -215,11 +386,14 @@ function splitName(fullName) {
  * @returns {Object} Normalized contact
  */
 function normalizeWebScraperContact(contact) {
-  const { firstName, lastName } = splitName(contact.name);
+  const nameParts = splitName(contact.name);
+  // Prefer explicit firstName/lastName from Claude extraction over split-from-name
+  const firstName = contact.firstName || nameParts.firstName;
+  const lastName = contact.lastName || nameParts.lastName;
   return {
     name: contact.name || null,
-    firstName: contact.firstName || firstName,
-    lastName: contact.lastName || lastName,
+    firstName: firstName,
+    lastName: lastName,
     email: contact.email || null,
     phone: contact.phone || null,
     title: contact.role || contact.title || null,
@@ -313,16 +487,28 @@ function getWaterfallStats(results) {
     total: results.size,
     webScrape: 0,
     hunter: 0,
+    genericFallback: 0,
     noContacts: 0,
-    totalContacts: 0
+    totalContacts: 0,
+    firstNamePatterns: 0,
+    decisionMakerSearches: 0
   };
 
   for (const result of results.values()) {
     if (result.source === 'web_scrape') stats.webScrape++;
     else if (result.source === 'hunter') stats.hunter++;
+    else if (result.source === 'generic_fallback') stats.genericFallback++;
     else stats.noContacts++;
 
     stats.totalContacts += result.contacts?.length || 0;
+
+    // Track new enrichment methods
+    if (result.log?.emailRecovery?.firstNamePatterns) {
+      stats.firstNamePatterns += result.log.emailRecovery.firstNamePatterns;
+    }
+    if (result.log?.decisionMakerSearch?.found > 0) {
+      stats.decisionMakerSearches++;
+    }
   }
 
   stats.webScrapeRate = stats.total > 0 ? (stats.webScrape / stats.total * 100).toFixed(1) + '%' : '0%';

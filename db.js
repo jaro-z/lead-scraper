@@ -212,9 +212,12 @@ function upsertCompany(company, searchId) {
 function getCompaniesBySearch(searchId) {
   return db.prepare(`
     SELECT c.*,
-      (SELECT email FROM contacts WHERE company_id = c.id AND is_primary = 1 LIMIT 1) as primary_email
+      pc.email as primary_email,
+      pc.title as primary_contact_title,
+      pc.first_name as primary_contact_first_name
     FROM companies c
     JOIN search_companies sc ON c.id = sc.company_id
+    LEFT JOIN contacts pc ON pc.company_id = c.id AND pc.is_primary = 1
     WHERE sc.search_id = ?
     ORDER BY c.name ASC
   `).all(searchId);
@@ -223,8 +226,11 @@ function getCompaniesBySearch(searchId) {
 function getAllCompanies() {
   return db.prepare(`
     SELECT c.*,
-      (SELECT email FROM contacts WHERE company_id = c.id AND is_primary = 1 LIMIT 1) as primary_email
+      pc.email as primary_email,
+      pc.title as primary_contact_title,
+      pc.first_name as primary_contact_first_name
     FROM companies c
+    LEFT JOIN contacts pc ON pc.company_id = c.id AND pc.is_primary = 1
     ORDER BY c.name ASC
   `).all();
 }
@@ -292,6 +298,60 @@ function exportToCSV(companies) {
   ].map(escapeCSV));
 
   return [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
+}
+
+function exportToYAMM(filters = {}) {
+  let query = `
+    SELECT c.name, c.address, c.segment, c.website, c.rating, c.rating_count,
+           ct.first_name, ct.email
+    FROM companies c
+    JOIN contacts ct ON ct.company_id = c.id AND ct.is_primary = 1
+    WHERE ct.email_valid = 1
+  `;
+  const params = [];
+
+  if (filters.segment) {
+    query += ' AND c.segment = ?';
+    params.push(filters.segment);
+  }
+  if (filters.ids && filters.ids.length > 0) {
+    query += ` AND c.id IN (${filters.ids.map(() => '?').join(',')})`;
+    params.push(...filters.ids);
+  }
+
+  query += ' ORDER BY c.name ASC';
+
+  const rows = db.prepare(query).all(...params);
+
+  const headers = ['First Name', 'Email', 'Company', 'Segment', 'City', 'Website', 'Rating', 'Reviews'];
+  const csvRows = rows.map(r => {
+    // Extract city from Czech address format: "Street, PostalCode City-District, Czechia"
+    let city = '';
+    if (r.address) {
+      const parts = r.address.split(',').map(p => p.trim());
+      // Skip last part if it's a country name
+      const lastPart = parts[parts.length - 1];
+      const isCountry = /^(czechia|czech republic|germany|austria|slovakia|poland)/i.test(lastPart);
+      const cityPart = isCountry && parts.length > 1 ? parts[parts.length - 2] : lastPart;
+      // Remove postal code (Czech format: 123 45 or 12345)
+      city = cityPart.replace(/\d{3}\s?\d{2}/, '').replace(/\s+/g, ' ').trim();
+      // Normalize Prague/Brno districts: "Praha 5-Zbraslav" -> "Praha", "Praha-Lipence" -> "Praha"
+      city = city.replace(/^(Praha|Brno|Ostrava|Plzeň)\s*\d*\s*[-].*$/i, '$1').trim();
+      // Also catch "Praha 5" without district name
+      city = city.replace(/^(Praha|Brno|Ostrava|Plzeň)\s+\d+$/i, '$1').trim();
+    }
+    return [
+      r.first_name || '', r.email, r.name, r.segment || '', city,
+      r.website || '', r.rating || '', r.rating_count || ''
+    ].map(escapeCSV);
+  });
+
+  return [headers.join(','), ...csvRows.map(row => row.join(','))].join('\n');
+}
+
+function getUncheckedEmailCount() {
+  const result = db.prepare('SELECT COUNT(*) as count FROM contacts WHERE email_valid IS NULL AND email IS NOT NULL').get();
+  return result.count;
 }
 
 // ============ Contacts (Hunter Enrichment) ============
@@ -487,6 +547,7 @@ function getPipelineStats() {
       SUM(CASE WHEN pipeline_stage = 'qualified' THEN 1 ELSE 0 END) as qualified,
       SUM(CASE WHEN pipeline_stage = 'ready' THEN 1 ELSE 0 END) as ready,
       SUM(CASE WHEN in_notion = 1 THEN 1 ELSE 0 END) as in_notion,
+      SUM(CASE WHEN pipeline_stage = 'parked' THEN 1 ELSE 0 END) as parked,
       COUNT(*) as total
     FROM companies
   `).get();
@@ -498,8 +559,45 @@ function getPipelineStats() {
     qualified: stats.qualified || 0,
     ready: stats.ready || 0,
     in_notion: stats.in_notion || 0,
+    parked: stats.parked || 0,
     total: stats.total || 0
   };
+}
+
+/**
+ * Get all companies by pipeline stage (global, across all searches)
+ * Uses same logic as getPipelineStats() so counts match
+ * @param {string} stage - Pipeline stage to filter by
+ * @returns {Array} Companies matching the stage
+ */
+function getCompaniesByStage(stage) {
+  const validStages = ['raw', 'no_website', 'enriched', 'qualified', 'ready', 'parked'];
+  if (!validStages.includes(stage)) {
+    throw new Error(`Invalid pipeline stage: ${stage}`);
+  }
+
+  let whereClause;
+  switch (stage) {
+    case 'raw':
+      whereClause = "(pipeline_stage = 'raw' OR pipeline_stage IS NULL) AND website IS NOT NULL AND website != ''";
+      break;
+    case 'no_website':
+      whereClause = "pipeline_stage = 'no_website' OR ((pipeline_stage IS NULL OR pipeline_stage = 'raw') AND (website IS NULL OR website = ''))";
+      break;
+    default:
+      whereClause = `pipeline_stage = '${stage}'`;
+  }
+
+  return db.prepare(`
+    SELECT c.*,
+      pc.email as primary_email,
+      pc.title as primary_contact_title,
+      pc.first_name as primary_contact_first_name
+    FROM companies c
+    LEFT JOIN contacts pc ON pc.company_id = c.id AND pc.is_primary = 1
+    WHERE ${whereClause}
+    ORDER BY c.name ASC
+  `).all();
 }
 
 /**
@@ -508,7 +606,7 @@ function getPipelineStats() {
  * @param {string} stage - New pipeline stage
  */
 function updatePipelineStage(id, stage) {
-  const validStages = ['raw', 'no_website', 'enriched', 'qualified', 'ready'];
+  const validStages = ['raw', 'no_website', 'enriched', 'qualified', 'ready', 'parked'];
   if (!validStages.includes(stage)) {
     throw new Error(`Invalid pipeline stage: ${stage}`);
   }
@@ -757,6 +855,7 @@ module.exports = {
   upsertCompany,
   getCompaniesBySearch,
   getAllCompanies,
+  getCompaniesByStage,
   getCompanyById,
   deleteCompany,
   bulkDeleteCompanies,
@@ -765,6 +864,8 @@ module.exports = {
   incrementApiUsage,
   canMakeApiCall,
   exportToCSV,
+  exportToYAMM,
+  getUncheckedEmailCount,
   saveContacts,
   getContactsByCompany,
   getPrimaryContact,

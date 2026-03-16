@@ -606,7 +606,93 @@ describe('Contact Waterfall - contactWaterfall.js', () => {
 // ============================================================================
 
 describe('Web Scraper Helpers - webScraper.js', () => {
-  const { cleanHtml, deduplicateContacts, findTeamPageUrls, TEAM_PAGE_PATTERNS } = require('../enrichment/webScraper');
+  const { cleanHtml, deduplicateContacts, findTeamPageUrls, TEAM_PAGE_PATTERNS, isGenericEmail } = require('../enrichment/webScraper');
+
+  describe('Person-Associated Generic Email Handling', () => {
+    it('should identify generic emails correctly with isGenericEmail()', () => {
+      assert.strictEqual(isGenericEmail('info@company.cz'), true);
+      assert.strictEqual(isGenericEmail('kontakt@company.cz'), true);
+      assert.strictEqual(isGenericEmail('contact@company.cz'), true);
+      assert.strictEqual(isGenericEmail('office@company.cz'), true);
+      assert.strictEqual(isGenericEmail('support@company.cz'), true);
+      assert.strictEqual(isGenericEmail('hello@company.cz'), true);
+      // Personal emails should NOT be generic
+      assert.strictEqual(isGenericEmail('petr@company.cz'), false);
+      assert.strictEqual(isGenericEmail('lucie.novakova@company.cz'), false);
+    });
+
+    it('should preserve emailAssociatedWithPerson flag through deduplication', () => {
+      const contacts = [
+        {
+          name: 'Ing. Lucie Šplíchalová',
+          email: 'info@4m-digital.eu',
+          role: 'CEO',
+          emailAssociatedWithPerson: true
+        },
+        {
+          name: 'Jan Novák',
+          email: 'jan@4m-digital.eu',
+          role: 'Developer',
+          emailAssociatedWithPerson: false
+        }
+      ];
+
+      const result = deduplicateContacts(contacts);
+
+      assert.strictEqual(result.length, 2);
+      const lucieContact = result.find(c => c.name === 'Ing. Lucie Šplíchalová');
+      assert.ok(lucieContact, 'Lucie should be in results');
+      assert.strictEqual(lucieContact.emailAssociatedWithPerson, true);
+      assert.strictEqual(lucieContact.email, 'info@4m-digital.eu');
+    });
+
+    it('should separate person-associated generic emails from unassociated ones', () => {
+      // Simulate the contact assembly logic
+      const mergedContacts = [
+        { name: 'Lucie Novak', email: 'info@company.cz', role: 'CEO', emailAssociatedWithPerson: true },
+        { name: 'General', email: 'kontakt@company.cz', role: null, emailAssociatedWithPerson: false },
+        { name: 'Petr Kucera', email: 'petr@company.cz', role: 'Developer', emailAssociatedWithPerson: false }
+      ];
+
+      // Filter logic as implemented in webScraper.js
+      const personalContacts = mergedContacts.filter(c => c.email && !isGenericEmail(c.email));
+      const personAssociatedGeneric = mergedContacts.filter(
+        c => c.email && isGenericEmail(c.email) && c.emailAssociatedWithPerson && c.name
+      );
+      const unassociatedGeneric = mergedContacts.filter(
+        c => c.email && isGenericEmail(c.email) && !c.emailAssociatedWithPerson
+      );
+
+      // Verify filtering
+      assert.strictEqual(personalContacts.length, 1, 'Should have 1 personal contact (Petr)');
+      assert.strictEqual(personalContacts[0].name, 'Petr Kucera');
+
+      assert.strictEqual(personAssociatedGeneric.length, 1, 'Should have 1 person-associated generic (Lucie)');
+      assert.strictEqual(personAssociatedGeneric[0].name, 'Lucie Novak');
+      assert.strictEqual(personAssociatedGeneric[0].email, 'info@company.cz');
+
+      assert.strictEqual(unassociatedGeneric.length, 1, 'Should have 1 unassociated generic');
+      assert.strictEqual(unassociatedGeneric[0].email, 'kontakt@company.cz');
+    });
+
+    it('should NOT create "General Contact" when person-associated generic email exists', () => {
+      // Simulate a scenario where only a person-associated generic email exists
+      const mergedContacts = [
+        { name: 'Lucie Novak', email: 'info@company.cz', role: 'CEO', emailAssociatedWithPerson: true }
+      ];
+
+      const personalContacts = mergedContacts.filter(c => c.email && !isGenericEmail(c.email));
+      const personAssociatedGeneric = mergedContacts.filter(
+        c => c.email && isGenericEmail(c.email) && c.emailAssociatedWithPerson && c.name
+      );
+      const contactsWithEmail = [...personalContacts, ...personAssociatedGeneric];
+
+      // Should have contacts with email, so no "General Contact" fallback needed
+      assert.strictEqual(contactsWithEmail.length, 1);
+      assert.strictEqual(contactsWithEmail[0].name, 'Lucie Novak');
+      assert.strictEqual(contactsWithEmail[0].email, 'info@company.cz');
+    });
+  });
 
   describe('cleanHtml()', () => {
     it('should remove script tags', () => {

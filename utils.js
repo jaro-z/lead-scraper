@@ -264,6 +264,17 @@ function sanitizeContactField(value) {
     .trim() || null;
 }
 
+/**
+ * Remove diacritics from a string (č→c, ř→r, š→s, etc.)
+ * Useful for email pattern generation from Czech names
+ * @param {string} str - String to normalize
+ * @returns {string} String without diacritics, lowercased
+ */
+function removeDiacritics(str) {
+  if (!str) return '';
+  return str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 module.exports = {
   sanitizeErrorMessage,
   extractDomain,
@@ -275,5 +286,6 @@ module.exports = {
   escapeCSV,
   safeString,
   safeArray,
-  sanitizeContactField
+  sanitizeContactField,
+  removeDiacritics
 };

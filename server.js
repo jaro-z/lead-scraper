@@ -266,6 +266,11 @@ app.get('/api/companies/stats', asyncHandler(async (req, res) => {
   res.json(stats);
 }));
 
+// Get companies by pipeline stage (global, across all searches)
+app.get('/api/companies/by-stage/:stage', asyncHandler((req, res) => {
+  res.json(db.getCompaniesByStage(req.params.stage));
+}));
+
 app.get('/api/companies/:id', asyncHandler((req, res) => {
   const company = getCompanyOrFail(req.params.id, res);
   if (company) res.json(company);
@@ -274,6 +279,17 @@ app.get('/api/companies/:id', asyncHandler((req, res) => {
 app.delete('/api/companies/:id', asyncHandler((req, res) => {
   db.deleteCompany(req.params.id);
   res.json({ success: true });
+}));
+
+app.post('/api/companies/bulk-stage', asyncHandler((req, res) => {
+  const { ids, stage } = req.body;
+  if (!ids || !Array.isArray(ids) || !ids.length || !stage) {
+    return res.status(400).json({ error: 'ids array and stage required' });
+  }
+  for (const id of ids) {
+    db.updatePipelineStage(id, stage);
+  }
+  res.json({ success: true, moved: ids.length, stage });
 }));
 
 app.post('/api/companies/bulk-delete', asyncHandler((req, res) => {
@@ -297,11 +313,31 @@ function sendCSV(res, companies, filename) {
 }
 
 app.get('/api/searches/:id/export', asyncHandler((req, res) => {
-  const companies = db.getCompaniesBySearch(req.params.id);
+  let companies = db.getCompaniesBySearch(req.params.id);
+  if (req.query.ids) {
+    const ids = new Set(req.query.ids.split(',').map(Number));
+    companies = companies.filter(c => ids.has(c.id));
+  }
   sendCSV(res, companies, `leads-search-${req.params.id}.csv`);
 }));
 app.get('/api/companies/export', asyncHandler((req, res) => {
   sendCSV(res, db.getAllCompanies(), 'all-leads.csv');
+}));
+
+app.get('/api/export/yamm', asyncHandler((req, res) => {
+  const filters = {};
+  if (req.query.segment) filters.segment = req.query.segment;
+  if (req.query.ids) filters.ids = req.query.ids.split(',').map(Number);
+
+  const csv = db.exportToYAMM(filters);
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="yamm-export.csv"');
+  res.send(csv);
+}));
+
+app.get('/api/contacts/unchecked-count', asyncHandler((req, res) => {
+  const count = db.getUncheckedEmailCount();
+  res.json({ unchecked: count });
 }));
 
 // ============ Usage ============
@@ -397,54 +433,6 @@ async function runEnrichmentStep(stepName, result, fn) {
     return null;
   }
 }
-
-/**
- * Process a single contact: validate email and assign template
- */
-async function processContact(contact, contactIndex, companyId, source) {
-  let emailValidation = null;
-
-  if (contact.email) {
-    try {
-      emailValidation = await validateEmail(contact.email);
-    } catch {
-      emailValidation = { valid: false, reason: 'validation_error' };
-    }
-  }
-
-  const templateType = assignTemplate(contact.title || contact.role);
-
-  db.saveContacts(companyId, [{
-    email: contact.email,
-    firstName: contact.firstName,
-    lastName: contact.lastName,
-    fullName: contact.name,
-    title: contact.title,
-    isPrimary: contactIndex === 0,
-    confidence: contact.confidence || 50
-  }]);
-
-  const dbContacts = db.getContactsByCompany(companyId);
-  const dbContact = dbContacts.find(c => c.email === contact.email);
-
-  if (dbContact) {
-    db.updateContactValidation(dbContact.id, {
-      email_valid: emailValidation?.valid || false,
-      email_validated_at: new Date().toISOString(),
-      template_type: templateType,
-      source: source || 'unknown',
-      phone: contact.phone || null
-    });
-  }
-
-  return {
-    ...contact,
-    email_valid: emailValidation?.valid || false,
-    template_type: templateType,
-    source
-  };
-}
-
 app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async (req, res) => {
   const company = getCompanyOrFail(req.params.id, res);
   if (!company) return;
@@ -647,19 +635,40 @@ app.post('/api/companies/enrich-batch', batchEnrichLimiter, asyncHandler(async (
       }
 
       const contactResult = await discoverContacts(company.id, domain, HUNTER_API_KEY);
-      if (contactResult.contacts?.length > 0) {
-        db.saveContacts(company.id, formatContactsForDB(contactResult.contacts));
-        results.contacts_found += contactResult.contacts.length;
+      // Save only contacts with emails (DB requires email NOT NULL)
+      const contactsWithEmail = (contactResult.contacts || []).filter(c => c.email);
+      if (contactsWithEmail.length > 0) {
+        db.saveContacts(company.id, formatContactsForDB(contactsWithEmail));
+        results.contacts_found += contactsWithEmail.length;
       }
 
-      // Update pipeline stage to enriched
-      try {
-        db.updatePipelineStage(company.id, 'enriched');
-      } catch {
-        // Continue even if stage update fails
+      // Save enrichment log for diagnostics
+      if (contactResult.log) {
+        try {
+          db.saveEnrichmentLog(company.id, contactResult.log);
+        } catch {
+          // Continue even if log save fails
+        }
       }
 
-      results.enriched++;
+      // Only move to 'enriched' if we found contacts with emails
+      if (contactsWithEmail.length > 0) {
+        try {
+          db.clearEnrichmentError(company.id);
+          db.updatePipelineStage(company.id, 'enriched');
+        } catch {
+          // Continue even if stage update fails
+        }
+        results.enriched++;
+      } else {
+        // No contacts found - stay current stage, set error for diagnostics
+        try {
+          db.setEnrichmentError(company.id, 'no_contacts');
+        } catch {
+          // Continue even if error logging fails
+        }
+      }
+
       results.processed++;
       await sleep(1000);
     } catch (err) {
@@ -1072,7 +1081,11 @@ app.post('/api/notion/dedupe/batch', asyncHandler(async (req, res) => {
 app.post('/api/notion/dedupe/search/:searchId', asyncHandler(async (req, res) => {
   if (!requireNotionConfig(res)) return;
 
-  const companies = db.getCompaniesBySearch(req.params.searchId);
+  let companies = db.getCompaniesBySearch(req.params.searchId);
+  if (req.body.companyIds && Array.isArray(req.body.companyIds)) {
+    const ids = new Set(req.body.companyIds);
+    companies = companies.filter(c => ids.has(c.id));
+  }
   if (!companies.length) {
     return res.json({ total: 0, duplicates: 0, unique: 0, results: [] });
   }

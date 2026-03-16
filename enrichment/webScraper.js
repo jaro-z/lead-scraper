@@ -36,9 +36,10 @@ const GENERIC_EMAIL_PREFIXES = [
 /**
  * Sanitize email address - remove URL encoding, HTML artifacts, validate format
  * @param {string} email - Raw email string
+ * @param {boolean} skipCompanyPattern - If true, don't filter company-pattern emails (for person-associated emails)
  * @returns {string|null} - Cleaned email or null if invalid
  */
-function sanitizeEmail(email) {
+function sanitizeEmail(email, skipCompanyPattern = false) {
   if (!email || typeof email !== 'string') return null;
 
   let cleaned = email.trim();
@@ -65,11 +66,14 @@ function sanitizeEmail(email) {
   if (!cleaned.includes('@') || !cleaned.includes('.')) return null;
 
   // Check for company-name@ pattern (e.g., woxo@woxo.cz, bpa@bpa.cz)
-  const [localPart, domain] = cleaned.toLowerCase().split('@');
-  const domainName = domain.split('.')[0]; // Get domain without TLD
-  if (localPart === domainName) {
-    // This is a company@ email pattern - treat as generic
-    return null;
+  // Skip this filter if the email is explicitly associated with a person
+  if (!skipCompanyPattern) {
+    const [localPart, domain] = cleaned.toLowerCase().split('@');
+    const domainName = domain.split('.')[0]; // Get domain without TLD
+    if (localPart === domainName) {
+      // This is a company@ email pattern - treat as generic
+      return null;
+    }
   }
 
   return cleaned.toLowerCase();
@@ -128,7 +132,7 @@ async function fetchPage(url, timeout = 30000) {
 
   const result = await firecrawl.scrapeUrl(url, {
     formats: ['html'],
-    waitFor: 3000, // Wait 3s for JS to render
+    waitFor: 3000, // Wait 3s for JS to render (raw HTTP fallback catches the rest)
     timeout: timeout
   });
 
@@ -136,8 +140,32 @@ async function fetchPage(url, timeout = 30000) {
     throw new Error(result.error || 'Firecrawl scrape failed');
   }
 
-  console.log(`[Firecrawl] Success: ${url}`);
-  return result.html || '';
+  let html = result.html || '';
+
+  // If HTML is suspiciously short, try with www prefix (redirect issue)
+  if (html.length < 500) {
+    try {
+      const parsed = new URL(url);
+      if (!parsed.hostname.startsWith('www.')) {
+        const wwwUrl = url.replace(parsed.hostname, 'www.' + parsed.hostname);
+        console.log(`[Firecrawl] Short HTML (${html.length} chars), retrying with www: ${wwwUrl}`);
+        const retryResult = await firecrawl.scrapeUrl(wwwUrl, {
+          formats: ['html'],
+          waitFor: 5000,
+          timeout: timeout
+        });
+        if (retryResult.success && (retryResult.html || '').length > html.length) {
+          html = retryResult.html;
+          console.log(`[Firecrawl] www retry got ${html.length} chars`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[Firecrawl] www retry failed: ${e.message}`);
+    }
+  }
+
+  console.log(`[Firecrawl] Success: ${url} (${html.length} chars)`);
+  return html;
 }
 
 
@@ -150,8 +178,15 @@ async function fetchPage(url, timeout = 30000) {
 async function rankBestPages(urls) {
   if (urls.length === 0) return [];
 
+  // Filter out obviously useless URLs before ranking
+  const filteredUrls = urls.filter(u => {
+    const lower = u.toLowerCase();
+    return !lower.includes('sitemap.xml') && !lower.includes('robots.txt') &&
+           !lower.endsWith('.pdf') && !lower.endsWith('.jpg') && !lower.endsWith('.png');
+  });
+
   // Limit URLs to avoid token overflow
-  const urlList = urls.slice(0, 50).join('\n');
+  const urlList = filteredUrls.slice(0, 50).join('\n');
 
   try {
     const response = await anthropic.messages.create({
@@ -173,7 +208,8 @@ Rules:
 - Rank by likelihood of having INDIVIDUAL people with emails/phones
 - Consider URL path keywords in any language
 - Czech: tým=team, lidé=people, vedení=leadership, o-nas/o-nás=about, kontakt=contact
-- IGNORE: homepage (/), services, products, blog, careers/jobs, legal, privacy, terms
+- IGNORE: services, products, blog, careers/jobs, legal, privacy, terms
+- INCLUDE homepage (/) if it looks like it may contain team/people info (small company sites often show founders on homepage)
 
 Return ONLY valid JSON array (no markdown), max 3 items:
 [{"url": "https://...", "category": "TEAM|ABOUT|CONTACT"}, ...]
@@ -252,10 +288,12 @@ async function extractContactsWithClaude(html, options = {}) {
       max_tokens: 2048,
       messages: [{
         role: 'user',
-        content: `Extract team contacts from this company website.
+        content: `Extract team contacts from this company website HTML.
 
 For each person found, extract:
-- name: Full name
+- name: Full name (MUST be first name + last name if available, e.g. "Jan Novák")
+- firstName: First name only (e.g. "Jan")
+- lastName: Last name only (e.g. "Novák") - set null if unknown
 - role: Job title (keep original language)
 - email: Email address (or null)
 - phone: Phone number (or null)
@@ -267,23 +305,60 @@ DECISION-MAKER CRITERIA (isDecisionMaker = true):
 - Directors, managing directors, board members
 - Partners, principals, presidents
 - Anyone in "management", "leadership", "vedení" (Czech)
-- Czech titles: jednatel, majitel, ředitel, zakladatel, společník
-- Department heads if they have budget authority
+
+CZECH DECISION-MAKER TITLES (always isDecisionMaker = true):
+- jednatel / jednatelka = managing director / statutory director
+- ředitel / ředitelka = director
+- majitel / majitelka = owner
+- zakladatel / zakladatelka = founder
+- spoluzakladatel = co-founder
+- společník = partner/shareholder
+- generální ředitel = CEO
+- obchodní ředitel = sales director
+- výkonný ředitel = executive director
+- vedoucí = head/leader (department head)
+
+NOT a job title (ignore these, set role to null):
+- "Kontakt" (just means "Contact" - it's a page label, not a role)
+- "Napište nám" (means "Write to us")
+- "Formulář" (means "Form")
+- Any navigation label, section header, or page title
 
 NOT decision-makers (isDecisionMaker = false):
 - Individual contributors (developers, designers, copywriters)
 - Specialists, consultants, assistants
-- Junior/entry-level roles
+- Junior/entry-level roles (junior, trainee, intern, stážista)
 - Support staff
+- Project managers (projektový manažer) - unless "senior" or "head of"
+
+NAME EXTRACTION RULES:
+- If you see a first name displayed (e.g. "Standa", "Jakub", "Petra") next to a photo or role, ALWAYS extract it as firstName
+- If only a first name is visible (no last name), still extract the person with lastName: null
+- This is CRITICAL for Czech agency team pages that often show first names only with photos
+- Look for names in image alt text, captions, headings, and team member cards
 
 EXTRACTION RULES:
-1. Extract EVERY person visible on the page
+1. Extract EVERY person visible on the page (even with first name only)
 2. Include ALL emails found (even generic like info@)
 3. Sort by importance: decision-makers first
 4. Keep job titles in their original language
+5. If a name appears with a role but the "role" is actually a page heading like "Kontakt" or a navigation item, set role to null
+
+GENERIC EMAIL ASSOCIATION:
+- Generic emails are: info@, kontakt@, contact@, office@, support@, sales@, hello@, obchod@, etc.
+- If a generic email appears DIRECTLY with a person's name and their contact details
+  (same visual block, card, or section), set "emailAssociatedWithPerson": true
+- This means the person personally uses this email, not just the company
+- Example: A contact page showing "Lucie Novak, CEO, info@company.cz, +420..."
+  → emailAssociatedWithPerson: true (the email belongs to Lucie specifically)
+- If the generic email is separate from people (e.g., in footer, standalone contact form,
+  or listed without a specific person's name), set emailAssociatedWithPerson: false or omit
 
 Return ONLY a JSON array:
-[{"name": "Petr Novák", "role": "CEO", "email": "petr@company.cz", "phone": "+420123456789", "isDecisionMaker": true}]
+[{"name": "Petr Novák", "firstName": "Petr", "lastName": "Novák", "role": "CEO", "email": "info@company.cz", "phone": "+420123456789", "isDecisionMaker": true, "emailAssociatedWithPerson": true}]
+
+Example with first-name-only:
+[{"name": "Standa", "firstName": "Standa", "lastName": null, "role": "Creative Director", "email": null, "phone": null, "isDecisionMaker": false}]
 
 Return [] if no people found.
 
@@ -306,17 +381,24 @@ ${truncatedHtml}`
 
     return contacts
       .filter(contact => contact.name && typeof contact.name === 'string' && contact.name.length >= 2)
-      .map(contact => ({
-        name: sanitizeContactField(contact.name),
-        role: sanitizeContactField(contact.role),
-        // If keepGeneric, just sanitize; otherwise filter out generic emails
-        email: keepGeneric
-          ? sanitizeEmail(contact.email)
-          : filterGenericEmail(contact.email),
-        phone: sanitizeContactField(contact.phone),
-        // Claude determines if this person is a decision-maker (can authorize purchases)
-        isDecisionMaker: contact.isDecisionMaker === true
-      }))
+      .map(contact => {
+        const isAssociatedWithPerson = contact.emailAssociatedWithPerson === true;
+        return {
+          name: sanitizeContactField(contact.name),
+          firstName: sanitizeContactField(contact.firstName) || null,
+          lastName: sanitizeContactField(contact.lastName) || null,
+          role: sanitizeContactField(contact.role),
+          // Keep email if associated with person (even generic), otherwise filter generics
+          email: isAssociatedWithPerson
+            ? sanitizeEmail(contact.email, true) // Skip company-pattern filter for associated emails
+            : (keepGeneric ? sanitizeEmail(contact.email) : filterGenericEmail(contact.email)),
+          phone: sanitizeContactField(contact.phone),
+          // Claude determines if this person is a decision-maker (can authorize purchases)
+          isDecisionMaker: contact.isDecisionMaker === true,
+          // Track if this generic email is personally associated with this contact
+          emailAssociatedWithPerson: isAssociatedWithPerson
+        };
+      })
       .filter(contact => contact.name);
 
   } catch (error) {
@@ -705,6 +787,55 @@ async function scrapeTeamPages(domain, options = {}) {
     log.pagesScraped.push(pageLog);
   }
 
+  // Step 3.5: If Firecrawl found no personal contacts, try raw HTTP fetch of homepage
+  // Many modern sites (Next.js, etc.) have CEO data in SSR HTML that gets replaced
+  // by lazy-loaded JS during hydration — Firecrawl's JS rendering actually hides it
+  const hasPersonalFromFirecrawl = allContactsRaw.some(c => c.email && !isGenericEmail(c.email));
+  if (!hasPersonalFromFirecrawl) {
+    try {
+      const homepageUrl = `https://${domain}`;
+      console.log(`[WebScraper] No personal contacts from Firecrawl, trying raw HTTP fetch: ${homepageUrl}`);
+      const rawRes = await fetch(homepageUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeadScraper/1.0)' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(15000)
+      });
+      const rawHtml = await rawRes.text();
+
+      if (rawHtml.length > 500) {
+        const rawPageLog = { url: homepageUrl, category: 'HOMEPAGE (raw fetch)', status: 'pending', contactsFound: 0, genericEmails: [] };
+
+        // Extract contacts from raw SSR HTML
+        let rawContacts = await extractContactsWithClaude(rawHtml, { keepGeneric: true });
+        for (const c of rawContacts) {
+          log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: homepageUrl + ' (raw)' });
+        }
+
+        // Backup: regex email extraction
+        const rawEmails = extractEmailsFromHtmlWithGeneric(rawHtml);
+        for (const email of rawEmails.generic) {
+          if (!allGenericEmails.includes(email)) {
+            allGenericEmails.push(email);
+            rawPageLog.genericEmails.push(email);
+          }
+        }
+
+        rawContacts = verifyAndAddMissedContacts(rawContacts, rawHtml);
+        rawPageLog.contactsFound = rawContacts.length;
+        rawPageLog.status = rawContacts.length > 0 ? 'success' : 'no_contacts';
+
+        if (rawContacts.length > 0) {
+          console.log(`[WebScraper] Raw fetch found ${rawContacts.length} contacts!`);
+        }
+
+        allContactsRaw.push(...rawContacts);
+        log.pagesScraped.push(rawPageLog);
+      }
+    } catch (rawErr) {
+      console.warn(`[WebScraper] Raw HTTP fetch failed: ${rawErr.message}`);
+    }
+  }
+
   // Step 4: Merge contacts across all pages (handles name-email matching)
   const contactCountBefore = allContactsRaw.length;
   let mergedContacts = deduplicateContacts(allContactsRaw);
@@ -715,24 +846,44 @@ async function scrapeTeamPages(domain, options = {}) {
   }
 
   // Step 5: Separate personal vs generic emails
+  // Personal emails (firstname@, etc.)
   const personalContacts = mergedContacts.filter(c => c.email && !isGenericEmail(c.email));
-  const genericContacts = mergedContacts.filter(c => c.email && isGenericEmail(c.email));
+  // Generic emails associated with a specific person (e.g., "Lucie Novak" with info@company.cz)
+  const personAssociatedGeneric = mergedContacts.filter(
+    c => c.email && isGenericEmail(c.email) && c.emailAssociatedWithPerson && c.name
+  );
+  // Generic emails NOT associated with any person (for "General Contact" fallback)
+  const unassociatedGeneric = mergedContacts.filter(
+    c => c.email && isGenericEmail(c.email) && !c.emailAssociatedWithPerson
+  );
   const noEmailContacts = mergedContacts.filter(c => !c.email && c.name);
 
-  // Track generic emails found
+  // Track unassociated generic emails (for fallback "General Contact")
   log.genericEmailsFound = [...new Set([
-    ...genericContacts.map(c => c.email),
+    ...unassociatedGeneric.map(c => c.email),
     ...allGenericEmails
   ])];
 
+  // Contacts with usable emails = personal + person-associated generic
+  const contactsWithEmail = [...personalContacts, ...personAssociatedGeneric];
+
   // Step 6: Determine final contacts
   let finalContacts;
-  if (personalContacts.length > 0) {
-    // We have personal emails - use those + contacts without emails (for Hunter recovery)
-    finalContacts = [...personalContacts, ...noEmailContacts];
+  if (contactsWithEmail.length > 0) {
+    // We have contacts with emails (personal or person-associated generic)
+    finalContacts = [...contactsWithEmail, ...noEmailContacts];
+    // Also include ONE unassociated generic email as supplementary contact point
+    if (log.genericEmailsFound.length > 0) {
+      finalContacts.push({
+        name: 'General Contact',
+        role: 'Company Email',
+        email: log.genericEmailsFound[0],
+        isGenericFallback: true
+      });
+    }
     log.result = 'success';
   } else if (noEmailContacts.length > 0) {
-    // We have names but no personal emails - keep them for Hunter lookup
+    // We have names but no personal/associated emails - keep them for Hunter lookup
     // Also include ONE generic email as fallback contact point
     finalContacts = [...noEmailContacts];
     if (log.genericEmailsFound.length > 0) {
@@ -746,7 +897,7 @@ async function scrapeTeamPages(domain, options = {}) {
     log.result = 'partial';
     log.genericEmailsOnly = true;
   } else if (log.genericEmailsFound.length > 0) {
-    // Only generic emails found - return as fallback
+    // Only unassociated generic emails found - return as fallback
     finalContacts = [{
       name: 'General Contact',
       role: 'Company Email',
@@ -789,7 +940,7 @@ async function scrapeTeamPages(domain, options = {}) {
     }
   }
 
-  console.log(`[WebScraper] Final: ${finalContacts.length} contacts (${personalContacts.length} with personal emails, ${noEmailContacts.length} names only, ${log.genericEmailsFound.length} generic)`);
+  console.log(`[WebScraper] Final: ${finalContacts.length} contacts (${personalContacts.length} personal, ${personAssociatedGeneric.length} person-associated generic, ${noEmailContacts.length} names only, ${log.genericEmailsFound.length} unassociated generic)`);
 
   // Step 8: Optional validation
   if (validateResults) {

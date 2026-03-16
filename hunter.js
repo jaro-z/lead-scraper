@@ -6,19 +6,22 @@
  * 2. Email Finder - Find email for a specific person (first_name + last_name + domain)
  */
 
-const { extractDomain } = require('./utils');
+const { extractDomain, removeDiacritics } = require('./utils');
 
 const HUNTER_API_BASE = 'https://api.hunter.io/v2';
 
-// Priority order for decision-maker titles
+// Priority order for decision-maker titles (English + Czech)
 const TITLE_PRIORITY = [
-  'ceo', 'chief executive',
-  'founder', 'co-founder', 'cofounder',
-  'owner',
-  'managing director', 'md',
+  'ceo', 'chief executive', 'generální ředitel',
+  'founder', 'co-founder', 'cofounder', 'zakladatel', 'spoluzakladatel',
+  'owner', 'majitel',
+  'jednatel', 'jednatelka',                    // Czech: statutory director / managing director
+  'managing director', 'md', 'výkonný ředitel',
   'president',
-  'principal',
-  'director'
+  'principal', 'společník',                     // Czech: partner/shareholder
+  'director', 'ředitel', 'ředitelka',
+  'vedoucí',                                    // Czech: head/leader
+  'obchodní ředitel'                            // Czech: sales/business director
 ];
 
 // Common email patterns for pattern guessing
@@ -155,13 +158,8 @@ async function emailFinder(domain, firstName, lastName, apiKey) {
 function generateEmailPatterns(firstName, lastName, domain) {
   if (!firstName || !lastName || !domain) return [];
 
-  const first = firstName.toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // Remove diacritics (č→c, ř→r)
-    .replace(/[^a-z]/g, ''); // Remove non-alpha
-
-  const last = lastName.toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z]/g, '');
+  const first = removeDiacritics(firstName).replace(/[^a-z]/g, '');
+  const last = removeDiacritics(lastName).replace(/[^a-z]/g, '');
 
   const f = first.charAt(0); // First initial
 
@@ -229,6 +227,168 @@ async function findEmailForContact(contact, domain, apiKey) {
 }
 
 /**
+ * Generate possible email addresses using ONLY the first name + domain email pattern.
+ * Used when web scraping finds team members with first names but no last names.
+ *
+ * Flow:
+ * 1. Call Hunter domain-search to get the company's email pattern (e.g., {first}@domain.cz)
+ * 2. Use that pattern with the first name to generate candidate emails
+ * 3. If Hunter has no pattern, fall back to common first-name-only patterns
+ *
+ * @param {string} firstName - Person's first name (e.g., "Standa")
+ * @param {string} domain - Company domain (e.g., "agency.cz")
+ * @param {string} apiKey - Hunter.io API key
+ * @returns {Promise<{email: string|null, candidates: string[], pattern: string|null, confidence: number, source: string}>}
+ */
+async function generateEmailFromFirstName(firstName, domain, apiKey) {
+  if (!firstName || !domain) {
+    return { email: null, candidates: [], pattern: null, confidence: 0, source: 'none' };
+  }
+
+  const first = removeDiacritics(firstName).replace(/[^a-z]/g, '');
+
+  if (!first) {
+    return { email: null, candidates: [], pattern: null, confidence: 0, source: 'none' };
+  }
+
+  // Try to get the domain's email pattern from Hunter
+  let hunterPattern = null;
+  if (apiKey) {
+    try {
+      const url = new URL(`${HUNTER_API_BASE}/domain-search`);
+      url.searchParams.set('domain', domain);
+      url.searchParams.set('api_key', apiKey);
+      url.searchParams.set('limit', '1'); // We only need the pattern, minimize data
+
+      const response = await fetch(url);
+      if (response.ok) {
+        const data = await response.json();
+        hunterPattern = data.data?.pattern;
+        console.log(`[Hunter] Domain pattern for ${domain}: ${hunterPattern || 'none found'}`);
+      }
+    } catch (error) {
+      console.warn(`[Hunter] Pattern lookup failed for ${domain}: ${error.message}`);
+    }
+  }
+
+  // Generate candidate emails
+  const candidates = [];
+
+  if (hunterPattern) {
+    // Use Hunter's known pattern. Hunter patterns look like: "{first}", "{first}.{last}", "{f}{last}", etc.
+    // For first-name-only, we can only use patterns that work with just a first name
+    const firstOnlyEmail = hunterPattern
+      .replace(/\{first\}/g, first)
+      .replace(/\{f\}/g, first.charAt(0));
+
+    // Only use the pattern if it doesn't still contain {last} placeholder (those need a last name)
+    if (!firstOnlyEmail.includes('{last}') && !firstOnlyEmail.includes('{l}')) {
+      candidates.push(`${firstOnlyEmail}@${domain}`);
+    } else {
+      // Pattern requires last name - still try {first}@domain as it's very common in CZ
+      candidates.push(`${first}@${domain}`);
+    }
+  }
+
+  // Always include common first-name-only patterns (very common in Czech companies)
+  const firstNamePatterns = [
+    `${first}@${domain}`,                    // standa@agency.cz (most common in CZ)
+  ];
+
+  for (const pattern of firstNamePatterns) {
+    if (!candidates.includes(pattern)) {
+      candidates.push(pattern);
+    }
+  }
+
+  // The first candidate (based on Hunter pattern or {first}@domain) is our best guess
+  const bestGuess = candidates[0] || null;
+
+  return {
+    email: bestGuess,
+    candidates,
+    pattern: hunterPattern,
+    confidence: hunterPattern ? 40 : 20, // Lower confidence since we don't have last name
+    source: 'first_name_pattern'
+  };
+}
+
+/**
+ * Search Hunter domain-search specifically for decision-maker contacts.
+ * Used as a secondary check when web scraping only found generic emails.
+ *
+ * @param {string} domain - Company domain
+ * @param {string} apiKey - Hunter.io API key
+ * @param {string[]} targetTitles - Title keywords to search for (default: executive titles)
+ * @returns {Promise<{contacts: Array, pattern: string|null}>}
+ */
+async function searchDecisionMakers(domain, apiKey, targetTitles) {
+  if (!domain || !apiKey) return { contacts: [], pattern: null };
+
+  const titles = targetTitles || ['ceo', 'founder', 'owner', 'director', 'managing', 'jednatel', 'ředitel', 'majitel'];
+
+  try {
+    const url = new URL(`${HUNTER_API_BASE}/domain-search`);
+    url.searchParams.set('domain', domain);
+    url.searchParams.set('api_key', apiKey);
+    // Hunter domain-search supports seniority filter
+    url.searchParams.set('seniority', 'senior,executive');
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.errors?.[0]?.details || `Hunter API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const allEmails = data.data?.emails || [];
+    const pattern = data.data?.pattern || null;
+
+    // Filter for decision-maker titles
+    const dmContacts = allEmails
+      .filter(e => {
+        if (!e.position) return false;
+        const pos = e.position.toLowerCase();
+        return titles.some(t => pos.includes(t));
+      })
+      .map(e => ({
+        email: e.value,
+        firstName: e.first_name,
+        lastName: e.last_name,
+        fullName: [e.first_name, e.last_name].filter(Boolean).join(' '),
+        title: e.position,
+        confidence: e.confidence,
+        source: 'hunter_dm_search',
+        isDecisionMaker: true
+      }))
+      .sort((a, b) => getTitlePriority(a.title) - getTitlePriority(b.title) || b.confidence - a.confidence);
+
+    // If no DM-specific contacts, return the top person by seniority
+    if (dmContacts.length === 0 && allEmails.length > 0) {
+      const topContact = allEmails
+        .map(e => ({
+          email: e.value,
+          firstName: e.first_name,
+          lastName: e.last_name,
+          fullName: [e.first_name, e.last_name].filter(Boolean).join(' '),
+          title: e.position,
+          confidence: e.confidence,
+          source: 'hunter_dm_search',
+          isDecisionMaker: false
+        }))
+        .sort((a, b) => getTitlePriority(a.title) - getTitlePriority(b.title) || b.confidence - a.confidence);
+
+      return { contacts: topContact.slice(0, 2), pattern };
+    }
+
+    return { contacts: dmContacts, pattern };
+  } catch (error) {
+    console.error(`[Hunter] Decision-maker search failed for ${domain}: ${error.message}`);
+    return { contacts: [], pattern: null };
+  }
+}
+
+/**
  * Enrich a single company
  */
 async function enrichCompany(website, apiKey) {
@@ -245,6 +405,8 @@ module.exports = {
   emailFinder,
   findEmailForContact,
   generateEmailPatterns,
+  generateEmailFromFirstName,
+  searchDecisionMakers,
   enrichCompany,
   TITLE_PRIORITY,
   EMAIL_PATTERNS

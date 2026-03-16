@@ -61,6 +61,7 @@
           <button class="stage-pill" data-stage="enriched">Enriched <span id="stat-enriched">0</span></button>
           <button class="stage-pill" data-stage="qualified">Qualified <span id="stat-qualified">0</span></button>
           <button class="stage-pill" data-stage="ready">Ready <span id="stat-ready">0</span></button>
+          <button class="stage-pill" data-stage="parked">Parked <span id="stat-parked">0</span></button>
         </div>
 
         <div class="toolbar-search">
@@ -72,7 +73,7 @@
 
         <div class="custom-select" id="segment-filter-wrapper">
           <button class="custom-select-trigger" id="segment-filter-btn">
-            <span id="segment-filter-text">All</span>
+            <span id="segment-filter-text">Segment</span>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M6 9l6 6 6-6"/>
             </svg>
@@ -84,19 +85,22 @@
           <input type="hidden" id="segment-filter" value="">
         </div>
 
-        <!-- Action buttons -->
-        <button id="dedupe-btn" class="btn btn-secondary btn-small" title="Check for duplicates">
-          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path d="M9 12l2 2 4-4"/>
-            <circle cx="12" cy="12" r="10"/>
-          </svg>
-          Dedupe
-        </button>
-
-        <button id="push-notion-btn" class="btn btn-secondary btn-small" disabled title="Select leads first">
-          <img src="notion-logo.png" alt="" width="14" height="14">
-          Push to Notion <span id="notion-count"></span>
-        </button>
+        <div class="custom-select" id="tier-filter-wrapper">
+          <button class="custom-select-trigger" id="tier-filter-btn">
+            <span id="tier-filter-text">Tier</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M6 9l6 6 6-6"/>
+            </svg>
+          </button>
+          <div class="custom-select-dropdown hidden" id="tier-filter-dropdown">
+            <button class="custom-select-option selected" data-value="">All Tiers</button>
+            <button class="custom-select-option" data-value="ceo">CEO/Founder</button>
+            <button class="custom-select-option" data-value="named">Named Person</button>
+            <button class="custom-select-option" data-value="generic">Generic Email</button>
+            <button class="custom-select-option" data-value="none">No Contact</button>
+          </div>
+          <input type="hidden" id="tier-filter" value="">
+        </div>
 
         <div class="toolbar-more">
           <button class="btn-more" id="more-menu-btn">
@@ -105,12 +109,18 @@
             </svg>
           </button>
           <div class="more-dropdown hidden" id="more-dropdown">
-            <button id="export-btn" class="dropdown-item">
-              <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                <path d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"/>
-              </svg>
-              Export CSV
-            </button>
+            <button id="export-yamm-btn" class="dropdown-item">Export YAMM</button>
+            <button id="export-btn" class="dropdown-item">Export CSV</button>
+            <button id="dedupe-btn" class="dropdown-item">Dedupe</button>
+            <button id="push-notion-btn" class="dropdown-item">Push to Notion <span id="notion-count"></span></button>
+            <div id="bulk-move-menu" class="dropdown-submenu hidden">
+              <div class="dropdown-item submenu-label">Move to...</div>
+              <button class="dropdown-item bulk-move-btn" data-stage="raw">Raw</button>
+              <button class="dropdown-item bulk-move-btn" data-stage="enriched">Enriched</button>
+              <button class="dropdown-item bulk-move-btn" data-stage="qualified">Qualified</button>
+              <button class="dropdown-item bulk-move-btn" data-stage="ready">Ready</button>
+              <button class="dropdown-item bulk-move-btn" data-stage="parked">Parked</button>
+            </div>
             <button id="delete-selected-btn" class="dropdown-item danger hidden">Delete Selected</button>
           </div>
         </div>
@@ -128,6 +138,7 @@
               <th class="sortable" data-sort="name">Name</th>
               <th class="sortable" data-sort="address">City</th>
               <th class="sortable" data-sort="website">Website</th>
+              <th class="sortable" data-sort="contact_tier">Contact</th>
               <th class="sortable" data-sort="segment">Segment</th>
               <th class="status-col">Status</th>
               <th>Actions</th>
@@ -372,6 +383,9 @@ NOTION_DATABASE_ID=your_database_id</pre>
     </button>
     <button class="context-menu-item" data-stage="ready">
       <span class="stage-dot ready"></span> Ready
+    </button>
+    <button class="context-menu-item" data-stage="parked">
+      <span class="stage-dot parked"></span> Parked
     </button>
   </div>
 

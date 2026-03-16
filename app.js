@@ -1,3 +1,15 @@
+// Segment color map
+const SEGMENT_COLORS = {
+  'Performance Marketing': { bg: '#DBEAFE', text: '#1D4ED8' },
+  'Brand Marketing': { bg: '#FEE2E2', text: '#DC2626' },
+  'Creative Agency': { bg: '#FEF3C7', text: '#D97706' },
+  'Web Development': { bg: '#CFFAFE', text: '#0891B2' },
+  'PR & Media': { bg: '#EDE9FE', text: '#7C3AED' },
+  'Full-Service Marketing': { bg: '#F3F4F6', text: '#374151' },
+  'Consulting': { bg: '#D1FAE5', text: '#059669' },
+  'Other': { bg: '#F3F4F6', text: '#6B7280' },
+};
+
 // State
 let currentView = 'dashboard';
 let currentSearchId = null;
@@ -7,7 +19,9 @@ let selectedIds = new Set();
 let sortColumn = 'name';
 let sortDirection = 'asc';
 let activeStageFilter = '';
-let pipelineStats = { raw: 0, enriched: 0, qualified: 0, ready: 0, in_notion: 0, total: 0 };
+let isGlobalView = false; // true when viewing all companies by stage (not filtered by search)
+let pipelineStats = { raw: 0, enriched: 0, qualified: 0, ready: 0, in_notion: 0, parked: 0, total: 0 };
+let allSegments = [];
 let rowStatuses = new Map(); // Track inline status per row
 
 // DOM Elements
@@ -41,12 +55,16 @@ function setupEventListeners() {
   // Filters
   document.getElementById('search-filter').addEventListener('input', debounce(applyFilters, 200));
 
-  // Custom segment dropdown
+  // Custom segment dropdown (options are populated dynamically by loadSegments/updateSegmentDropdown)
   document.getElementById('segment-filter-btn').addEventListener('click', toggleSegmentDropdown);
-  document.querySelectorAll('.custom-select-option').forEach(opt => {
-    opt.addEventListener('click', () => selectSegment(opt));
-  });
   document.addEventListener('click', closeSegmentDropdownOnClickOutside);
+
+  // Custom tier dropdown (options are populated dynamically by updateTierDropdown)
+  document.getElementById('tier-filter-btn').addEventListener('click', toggleTierDropdown);
+  document.addEventListener('click', closeTierDropdownOnClickOutside);
+
+  // Initialize tier dropdown with all options
+  updateTierDropdown();
 
   // Stage pill clicks
   document.querySelectorAll('.stage-pill').forEach(pill => {
@@ -66,8 +84,16 @@ function setupEventListeners() {
   // Delete selected
   document.getElementById('delete-selected-btn').addEventListener('click', handleDeleteSelected);
 
+  // Bulk move to stage
+  document.querySelectorAll('.bulk-move-btn').forEach(btn => {
+    btn.addEventListener('click', () => handleBulkMove(btn.dataset.stage));
+  });
+
   // Export
   document.getElementById('export-btn').addEventListener('click', handleExport);
+
+  // Export YAMM
+  document.getElementById('export-yamm-btn').addEventListener('click', handleYAMMExport);
 
   // Dedupe button
   document.getElementById('dedupe-btn').addEventListener('click', handleDedupe);
@@ -156,31 +182,54 @@ function toggleSegmentDropdown(e) {
 
 function selectSegment(option) {
   const value = option.dataset.value;
-  const text = option.textContent;
 
-  // Update hidden input
   document.getElementById('segment-filter').value = value;
+  document.getElementById('segment-filter-text').textContent = value ? option.textContent : 'Segment';
 
-  // Update button text
-  document.getElementById('segment-filter-text').textContent = text;
-
-  // Update selected state
-  document.querySelectorAll('.custom-select-option').forEach(opt => {
-    opt.classList.remove('selected');
-  });
-  option.classList.add('selected');
-
-  // Close dropdown
   document.getElementById('segment-filter-wrapper').classList.remove('open');
   document.getElementById('segment-filter-dropdown').classList.add('hidden');
 
-  // Apply filter
+  // Cross-filter: update tier dropdown to only show tiers that exist in this segment
+  updateTierDropdown();
   applyFilters();
 }
 
 function closeSegmentDropdownOnClickOutside(e) {
   const wrapper = document.getElementById('segment-filter-wrapper');
   const dropdown = document.getElementById('segment-filter-dropdown');
+
+  if (wrapper && dropdown && !wrapper.contains(e.target)) {
+    wrapper.classList.remove('open');
+    dropdown.classList.add('hidden');
+  }
+}
+
+// Tier dropdown helpers
+function toggleTierDropdown(e) {
+  e.stopPropagation();
+  const wrapper = document.getElementById('tier-filter-wrapper');
+  const dropdown = document.getElementById('tier-filter-dropdown');
+  wrapper.classList.toggle('open');
+  dropdown.classList.toggle('hidden');
+}
+
+function selectTier(option) {
+  const value = option.dataset.value;
+
+  document.getElementById('tier-filter').value = value;
+  document.getElementById('tier-filter-text').textContent = value ? option.textContent : 'Tier';
+
+  document.getElementById('tier-filter-wrapper').classList.remove('open');
+  document.getElementById('tier-filter-dropdown').classList.add('hidden');
+
+  // Cross-filter: update segment dropdown to only show segments that have companies with this tier
+  updateSegmentDropdown();
+  applyFilters();
+}
+
+function closeTierDropdownOnClickOutside(e) {
+  const wrapper = document.getElementById('tier-filter-wrapper');
+  const dropdown = document.getElementById('tier-filter-dropdown');
 
   if (wrapper && dropdown && !wrapper.contains(e.target)) {
     wrapper.classList.remove('open');
@@ -320,6 +369,14 @@ async function loadCompanies(searchId) {
     const res = await fetch(`/api/searches/${searchId}/companies`);
     companies = await res.json();
     filteredCompanies = [...companies];
+    isGlobalView = false;
+    activeStageFilter = '';
+
+    // Reset pills - default 'raw' as active
+    document.querySelectorAll('.stage-pill').forEach(pill => {
+      pill.classList.toggle('active', pill.dataset.stage === 'raw');
+    });
+
     renderCompanies();
     updateMainActionButton();
   } catch (error) {
@@ -327,31 +384,120 @@ async function loadCompanies(searchId) {
   }
 }
 
+async function loadCompaniesByStage(stage) {
+  try {
+    const res = await fetch(`/api/companies/by-stage/${stage}`);
+    companies = await res.json();
+    filteredCompanies = [...companies];
+    isGlobalView = true;
+    activeStageFilter = stage;
+    currentSearchId = null; // Clear search context
+
+    // Update title to show global view
+    const stageLabels = {
+      raw: 'Raw',
+      no_website: 'No Website',
+      enriched: 'Enriched',
+      qualified: 'Qualified',
+      ready: 'Ready',
+      parked: 'Parked'
+    };
+    document.getElementById('search-title').textContent = `All ${stageLabels[stage]} Companies`;
+    document.getElementById('search-meta').textContent = `${companies.length} companies across all searches`;
+
+    // Make sure results view is visible
+    dashboardView.classList.add('hidden');
+    resultsView.classList.remove('hidden');
+
+    renderCompanies();
+    updateMainActionButton();
+  } catch (error) {
+    console.error('Error loading companies by stage:', error);
+  }
+}
+
 async function loadSegments() {
   try {
     const res = await fetch('/api/segments');
     const segments = await res.json();
-
-    const dropdown = document.getElementById('segment-filter-dropdown');
-    // Keep the "All" option, remove dynamically added ones
-    const allOption = dropdown.querySelector('[data-value=""]');
-
-    // Clear existing dynamic options
-    dropdown.innerHTML = '';
-    dropdown.appendChild(allOption);
-
-    // Add segments from database
-    segments.forEach(segment => {
-      const btn = document.createElement('button');
-      btn.className = 'custom-select-option';
-      btn.dataset.value = segment;
-      btn.textContent = segment;
-      btn.addEventListener('click', () => selectSegment(btn));
-      dropdown.appendChild(btn);
-    });
+    allSegments = segments;
+    updateSegmentDropdown();
   } catch (error) {
     console.error('Error loading segments:', error);
   }
+}
+
+// Cross-filtering: update segment dropdown based on current tier filter
+function updateSegmentDropdown() {
+  const tierFilter = document.getElementById('tier-filter').value;
+  const dropdown = document.getElementById('segment-filter-dropdown');
+  const currentSegment = document.getElementById('segment-filter').value;
+
+  // Figure out which segments are available given the tier filter
+  let availableSegments = allSegments;
+  if (tierFilter && companies.length > 0) {
+    const segmentsWithTier = new Set();
+    companies.forEach(c => {
+      if (c.segment && getContactTier(c) === tierFilter) {
+        segmentsWithTier.add(c.segment);
+      }
+    });
+    availableSegments = allSegments.filter(s => segmentsWithTier.has(s));
+  }
+
+  dropdown.innerHTML = '';
+  const allBtn = document.createElement('button');
+  allBtn.className = 'custom-select-option' + (!currentSegment ? ' selected' : '');
+  allBtn.dataset.value = '';
+  allBtn.textContent = 'All';
+  allBtn.addEventListener('click', () => selectSegment(allBtn));
+  dropdown.appendChild(allBtn);
+
+  availableSegments.forEach(segment => {
+    const btn = document.createElement('button');
+    btn.className = 'custom-select-option' + (currentSegment === segment ? ' selected' : '');
+    btn.dataset.value = segment;
+    btn.textContent = segment;
+    btn.addEventListener('click', () => selectSegment(btn));
+    dropdown.appendChild(btn);
+  });
+}
+
+// Cross-filtering: update tier dropdown based on current segment filter
+function updateTierDropdown() {
+  const segmentFilter = document.getElementById('segment-filter').value;
+  const currentTier = document.getElementById('tier-filter').value;
+  const dropdown = document.getElementById('tier-filter-dropdown');
+
+  const allTiers = [
+    { value: '', label: 'All Tiers' },
+    { value: 'ceo', label: 'CEO/Founder' },
+    { value: 'named', label: 'Named Person' },
+    { value: 'generic', label: 'Generic Email' },
+    { value: 'none', label: 'No Contact' }
+  ];
+
+  // Figure out which tiers exist given the segment filter
+  let availableTiers = allTiers;
+  if (segmentFilter && companies.length > 0) {
+    const tiersInSegment = new Set();
+    companies.forEach(c => {
+      if (c.segment && c.segment.toLowerCase() === segmentFilter.toLowerCase()) {
+        tiersInSegment.add(getContactTier(c));
+      }
+    });
+    availableTiers = allTiers.filter(t => !t.value || tiersInSegment.has(t.value));
+  }
+
+  dropdown.innerHTML = '';
+  availableTiers.forEach(tier => {
+    const btn = document.createElement('button');
+    btn.className = 'custom-select-option' + (currentTier === tier.value ? ' selected' : '');
+    btn.dataset.value = tier.value;
+    btn.textContent = tier.label;
+    btn.addEventListener('click', () => selectTier(btn));
+    dropdown.appendChild(btn);
+  });
 }
 
 // ============ Render Functions ============
@@ -416,7 +562,7 @@ function renderCompanies() {
   const sorted = sortCompanies(filteredCompanies);
 
   if (!sorted.length) {
-    resultsBody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;">No results found</td></tr>';
+    resultsBody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;">No results found</td></tr>';
     document.getElementById('results-count').textContent = '';
     return;
   }
@@ -429,6 +575,7 @@ function renderCompanies() {
       <td>${escapeHtml(c.name || '-')}</td>
       <td>${escapeHtml(extractCity(c.address))}</td>
       <td>${c.website ? `<a href="${escapeHtml(c.website)}" target="_blank">${escapeHtml(formatWebsiteUrl(c.website))}</a>` : '<span style="color:#9CA3AF">-</span>'}</td>
+      <td class="contact-col">${formatContactCell(c)}</td>
       <td>${formatSegmentBadge(c.segment, c.enrichment_source)}</td>
       <td class="status-cell"><span class="status-${status.state}">${status.text}</span></td>
       <td>
@@ -469,6 +616,15 @@ function renderCompanies() {
       e.stopPropagation();
       const id = parseInt(btn.closest('tr').dataset.id);
       showDetails(id);
+    });
+  });
+
+  // Tier badge click → popover
+  resultsBody.querySelectorAll('.contact-tier-badge.clickable').forEach(badge => {
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const companyId = parseInt(badge.dataset.companyId);
+      if (companyId) showTierPopover(companyId, badge);
     });
   });
 
@@ -617,6 +773,13 @@ function sortCompanies(list) {
     let aVal = a[sortColumn];
     let bVal = b[sortColumn];
 
+    // Contact tier sort uses computed values
+    if (sortColumn === 'contact_tier') {
+      const tierOrder = { ceo: 0, named: 1, generic: 2, none: 3 };
+      aVal = tierOrder[getContactTier(a)] ?? 4;
+      bVal = tierOrder[getContactTier(b)] ?? 4;
+    }
+
     // Handle nulls
     if (aVal == null) aVal = '';
     if (bVal == null) bVal = '';
@@ -636,6 +799,7 @@ function sortCompanies(list) {
 function applyFilters() {
   const searchTerm = document.getElementById('search-filter').value.toLowerCase();
   const segmentFilter = document.getElementById('segment-filter').value;
+  const tierFilter = document.getElementById('tier-filter').value;
 
   filteredCompanies = companies.filter(c => {
     const matchesSearch = !searchTerm ||
@@ -646,10 +810,8 @@ function applyFilters() {
     let matchesStage = true;
     if (activeStageFilter) {
       if (activeStageFilter === 'no_website') {
-        // Match companies without website
         matchesStage = !c.website || c.pipeline_stage === 'no_website';
       } else if (activeStageFilter === 'raw') {
-        // Match raw companies WITH website
         matchesStage = c.website && (!c.pipeline_stage || c.pipeline_stage === 'raw');
       } else {
         matchesStage = c.pipeline_stage === activeStageFilter;
@@ -660,7 +822,10 @@ function applyFilters() {
     const matchesSegment = !segmentFilter ||
       (c.segment && c.segment.toLowerCase().includes(segmentFilter.toLowerCase()));
 
-    return matchesSearch && matchesStage && matchesSegment;
+    // Contact tier filter
+    const matchesTier = !tierFilter || getContactTier(c) === tierFilter;
+
+    return matchesSearch && matchesStage && matchesSegment && matchesTier;
   });
 
   renderCompanies();
@@ -696,11 +861,14 @@ function handleRowSelect(e) {
 
 function updateDeleteButton() {
   const btn = document.getElementById('delete-selected-btn');
+  const moveMenu = document.getElementById('bulk-move-menu');
   if (selectedIds.size > 0) {
     btn.classList.remove('hidden');
     btn.textContent = `Delete (${selectedIds.size})`;
+    moveMenu.classList.remove('hidden');
   } else {
     btn.classList.add('hidden');
+    moveMenu.classList.add('hidden');
   }
 }
 
@@ -716,6 +884,35 @@ async function handleDelete(id) {
     updateDeleteButton();
   } catch (error) {
     alert('Error deleting: ' + error.message);
+  }
+}
+
+async function handleBulkMove(stage) {
+  const ids = Array.from(selectedIds);
+  if (!ids.length) return;
+
+  try {
+    const res = await fetch('/api/companies/bulk-stage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, stage })
+    });
+
+    if (res.ok) {
+      const result = await res.json();
+      // Update local state
+      companies.forEach(c => {
+        if (selectedIds.has(c.id)) c.pipeline_stage = stage;
+      });
+      selectedIds.clear();
+      document.getElementById('select-all').checked = false;
+      await updatePipelineStats();
+      renderCompanies();
+      updateDeleteButton();
+      updateMainActionButton();
+    }
+  } catch (error) {
+    alert('Error moving: ' + error.message);
   }
 }
 
@@ -741,7 +938,46 @@ async function handleDeleteSelected() {
 }
 
 function handleExport() {
-  window.location.href = `/api/searches/${currentSearchId}/export`;
+  if (selectedIds.size > 0) {
+    const ids = Array.from(selectedIds).join(',');
+    window.location.href = `/api/searches/${currentSearchId}/export?ids=${ids}`;
+  } else {
+    window.location.href = `/api/searches/${currentSearchId}/export`;
+  }
+}
+
+async function handleYAMMExport() {
+  // Check for unchecked emails first
+  try {
+    const resp = await fetch('/api/contacts/unchecked-count');
+    const data = await resp.json();
+    if (data.unchecked > 0) {
+      const proceed = confirm(`Warning: ${data.unchecked} contact emails haven't been validated yet. Only validated emails will be included in the export.\n\nContinue?`);
+      if (!proceed) return;
+    }
+  } catch (e) {
+    // Continue anyway if check fails
+  }
+
+  let url = '/api/export/yamm';
+  const params = [];
+
+  // If rows are selected, only export those
+  if (selectedIds.size > 0) {
+    params.push('ids=' + Array.from(selectedIds).join(','));
+  }
+
+  // If segment filter is active, include it
+  const segmentText = document.getElementById('segment-filter-text')?.textContent;
+  if (segmentText && segmentText !== 'Segment' && segmentText !== 'All') {
+    params.push('segment=' + encodeURIComponent(segmentText));
+  }
+
+  if (params.length > 0) {
+    url += '?' + params.join('&');
+  }
+
+  window.location.href = url;
 }
 
 async function handleEnrich() {
@@ -1121,18 +1357,24 @@ async function showDetails(id) {
     } catch (e) {}
   }
 
+  const currentStage = company.pipeline_stage || 'raw';
+  const stages = ['raw', 'enriched', 'qualified', 'ready', 'in_notion', 'parked'];
+  const stageOptions = stages.map(s =>
+    `<option value="${s}" ${s === currentStage ? 'selected' : ''}>${s.charAt(0).toUpperCase() + s.slice(1).replace('_', ' ')}</option>`
+  ).join('');
+
   content.innerHTML = `
     <div class="field">
       <div class="field-label">Name</div>
       <div class="field-value">${escapeHtml(company.name || '-')}</div>
     </div>
     <div class="field">
-      <div class="field-label">Address</div>
-      <div class="field-value">${escapeHtml(company.address || '-')}</div>
-    </div>
-    <div class="field">
-      <div class="field-label">Category</div>
-      <div class="field-value">${escapeHtml(formatCategory(company.category))}</div>
+      <div class="field-label">Stage</div>
+      <div class="field-value">
+        <select class="detail-stage-select" id="detail-stage-select" data-company-id="${company.id}">
+          ${stageOptions}
+        </select>
+      </div>
     </div>
     ${company.segment ? `
     <div class="field">
@@ -1140,69 +1382,98 @@ async function showDetails(id) {
       <div class="field-value">${formatSegmentBadge(company.segment, company.enrichment_source)}</div>
     </div>
     ` : ''}
-    ${company.industry ? `
-    <div class="field">
-      <div class="field-label">Industry</div>
-      <div class="field-value">${escapeHtml(company.industry)}</div>
-    </div>
-    ` : ''}
-    ${company.ico ? `
-    <div class="field">
-      <div class="field-label">IČO (Czech ID)</div>
-      <div class="field-value">
-        <span class="ico-badge ${company.ico_validated ? 'validated' : ''}">
-          ${escapeHtml(company.ico)}
-          ${company.ico_validated ? '<svg class="check-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>' : ''}
-        </span>
-      </div>
-    </div>
-    ` : ''}
-    ${company.company_size ? `
-    <div class="field">
-      <div class="field-label">Company Size</div>
-      <div class="field-value">${escapeHtml(company.company_size)}</div>
-    </div>
-    ` : ''}
     <div class="field">
       <div class="field-label">Website</div>
       <div class="field-value">${company.website ? `<a href="${escapeHtml(company.website)}" target="_blank">${escapeHtml(company.website)}</a>` : '-'}</div>
-    </div>
-    <div class="field">
-      <div class="field-label">Phone</div>
-      <div class="field-value">${escapeHtml(company.phone || '-')}</div>
-    </div>
-    <div class="field">
-      <div class="field-label">Rating</div>
-      <div class="field-value">${company.rating ? `${company.rating} (${company.rating_count} reviews)` : '-'}</div>
     </div>
     <div class="field contacts-section">
       <div class="field-label">Contacts</div>
       <div class="field-value">${contactsHtml}</div>
     </div>
-    ${company.enrichment_source ? `
-    <div class="field">
-      <div class="field-label">Enrichment Source</div>
-      <div class="field-value"><span class="enrichment-badge ${company.enrichment_source.includes('web') ? 'web_scrape' : 'hunter'}">${escapeHtml(company.enrichment_source)}</span></div>
-    </div>
-    ` : ''}
     ${enrichmentLogHtml}
-    <div class="field">
-      <div class="field-label">Business Status</div>
-      <div class="field-value">${escapeHtml(company.business_status || '-')}</div>
-    </div>
-    <div class="field">
-      <div class="field-label">Types</div>
-      <div class="field-value">${types ? types.map(t => formatCategory(t)).join(', ') : '-'}</div>
-    </div>
-    <div class="field">
-      <div class="field-label">Opening Hours</div>
-      <div class="field-value">${openingHours?.weekdayDescriptions ? openingHours.weekdayDescriptions.join('<br>') : '-'}</div>
-    </div>
-    <div class="field">
-      <div class="field-label">Google Place ID</div>
-      <div class="field-value" style="font-size:11px;word-break:break-all;">${escapeHtml(company.place_id)}</div>
+    <div class="details-more">
+      <button class="details-toggle-btn" onclick="this.parentElement.classList.toggle('expanded')">
+        More details
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div class="details-extra">
+        <div class="field">
+          <div class="field-label">Address</div>
+          <div class="field-value">${escapeHtml(company.address || '-')}</div>
+        </div>
+        ${company.industry ? `
+        <div class="field">
+          <div class="field-label">Industry</div>
+          <div class="field-value">${escapeHtml(company.industry)}</div>
+        </div>
+        ` : ''}
+        ${company.ico ? `
+        <div class="field">
+          <div class="field-label">IČO</div>
+          <div class="field-value">
+            <span class="ico-badge ${company.ico_validated ? 'validated' : ''}">
+              ${escapeHtml(company.ico)}
+              ${company.ico_validated ? ' ✓' : ''}
+            </span>
+          </div>
+        </div>
+        ` : ''}
+        ${company.company_size ? `
+        <div class="field">
+          <div class="field-label">Size</div>
+          <div class="field-value">${escapeHtml(company.company_size)}</div>
+        </div>
+        ` : ''}
+        <div class="field">
+          <div class="field-label">Phone</div>
+          <div class="field-value">${escapeHtml(company.phone || '-')}</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Rating</div>
+          <div class="field-value">${company.rating ? `${company.rating} (${company.rating_count} reviews)` : '-'}</div>
+        </div>
+        ${company.enrichment_source ? `
+        <div class="field">
+          <div class="field-label">Source</div>
+          <div class="field-value"><span class="enrichment-badge ${company.enrichment_source.includes('web') ? 'web_scrape' : 'hunter'}">${escapeHtml(company.enrichment_source)}</span></div>
+        </div>
+        ` : ''}
+        <div class="field">
+          <div class="field-label">Category</div>
+          <div class="field-value">${escapeHtml(formatCategory(company.category))}</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Business Status</div>
+          <div class="field-value">${escapeHtml(company.business_status || '-')}</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Place ID</div>
+          <div class="field-value" style="font-size:11px;word-break:break-all;">${escapeHtml(company.place_id)}</div>
+        </div>
+      </div>
     </div>
   `;
+
+  // Wire up stage selector
+  document.getElementById('detail-stage-select').addEventListener('change', async (e) => {
+    const newStage = e.target.value;
+    const companyId = parseInt(e.target.dataset.companyId);
+    try {
+      const res = await fetch(`/api/companies/${companyId}/stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage: newStage })
+      });
+      if (res.ok) {
+        const comp = companies.find(c => c.id === companyId);
+        if (comp) comp.pipeline_stage = newStage;
+        await updatePipelineStats();
+        renderTable();
+      }
+    } catch (err) {
+      console.error('Stage change failed:', err);
+    }
+  });
 
   fullViewPanel.classList.remove('hidden');
 }
@@ -1318,21 +1589,35 @@ function hideModal(modal) {
 function buildEnrichmentLogHtml(log, error) {
   if (!log && !error) return '';
 
-  let resultClass = 'success';
-  let resultText = 'Success';
+  // Determine final result based on all waterfall steps
+  const webResult = log?.webScrape?.result;
+  const hunterFound = log?.hunter?.found > 0;
+  const patternFound = log?.decisionMakerSearch?.found > 0;
+  const scrapedContacts = log?.webScrape?.contactsKept?.length || 0;
+  const hasPersonalContacts = scrapedContacts > 0 || hunterFound || patternFound;
 
-  if (error === 'no_contacts' || (log && log.webScrape && log.webScrape.result === 'no_contacts')) {
-    resultClass = 'error';
-    resultText = 'No contacts found';
-  } else if (log && log.webScrape && log.webScrape.result === 'no_urls') {
+  let resultClass, resultText;
+
+  if (hasPersonalContacts) {
+    resultClass = 'success';
+    const sources = [];
+    if (scrapedContacts > 0) sources.push('scrape');
+    if (patternFound) sources.push('pattern');
+    if (hunterFound) sources.push('hunter');
+    resultText = `Found ${scrapedContacts + (log?.hunter?.found || 0) + (log?.decisionMakerSearch?.found || 0)} contact(s) via ${sources.join(' + ')}`;
+  } else if (webResult === 'no_urls') {
     resultClass = 'error';
     resultText = 'Could not map domain';
-  } else if (log && log.webScrape && log.webScrape.result === 'no_relevant_pages') {
+  } else if (webResult === 'generic_only') {
     resultClass = 'warning';
-    resultText = 'No team/about pages found';
-  } else if (log && log.webScrape && log.webScrape.result === 'partial') {
+    const genericEmails = log?.webScrape?.genericEmailsFound || [];
+    resultText = `No personal contacts — only generic: ${genericEmails.join(', ') || 'none'}`;
+  } else if (webResult === 'partial') {
     resultClass = 'warning';
-    resultText = 'Contacts found (no email)';
+    resultText = 'Found names but no emails';
+  } else {
+    resultClass = 'error';
+    resultText = 'No contacts found';
   }
 
   const webLog = log?.webScrape || {};
@@ -1390,12 +1675,56 @@ function buildEnrichmentLogHtml(log, error) {
           <div class="log-header">Contacts extracted: ${contactsKept.length}</div>
           ${contactsHtml}
         </div>
+        ${buildHunterLogHtml(log)}
+        ${buildDecisionMakerLogHtml(log)}
         <div class="log-result ${resultClass}">
-          Result: ${resultClass === 'success' ? '✓' : '✗'} ${resultText}
+          Result: ${resultClass === 'success' ? '✓' : resultClass === 'warning' ? '⚠' : '✗'} ${resultText}
         </div>
       </div>
     </div>
   `;
+}
+
+function buildHunterLogHtml(log) {
+  if (!log?.hunter) {
+    // Hunter was never called — web scraping found contacts so waterfall returned early
+    const webResult = log?.webScrape?.result;
+    const contactsKept = log?.webScrape?.contactsKept?.length || 0;
+    let reason = 'Not needed — web scraping found contacts';
+    if (webResult === 'generic_only') reason = 'Not needed — only generic emails found';
+    else if (contactsKept > 0) reason = `Not needed — web scraping found ${contactsKept} contact${contactsKept > 1 ? 's' : ''}`;
+    return `<div class="log-section"><div class="log-header">Hunter.io: skipped</div><div class="log-item log-skipped">└─ ${reason}</div></div>`;
+  }
+  const h = log.hunter;
+  if (h.skipped && h.reason === 'no_api_key') {
+    return `<div class="log-section"><div class="log-header">Hunter.io: skipped</div><div class="log-item log-skipped">└─ No API key configured</div></div>`;
+  }
+  if (h.error) return `<div class="log-section"><div class="log-header">Hunter.io: ✗ error</div><div class="log-item log-skipped">└─ ${escapeHtml(h.error)}</div></div>`;
+  const found = h.found || 0;
+  let html = `<div class="log-section"><div class="log-header">Hunter.io: ${found} contact${found !== 1 ? 's' : ''} found</div>`;
+  if (!found) html += '<div class="log-item">└─ No results for this domain</div>';
+  html += '</div>';
+  return html;
+}
+
+function buildDecisionMakerLogHtml(log) {
+  if (!log?.decisionMakerSearch) {
+    // Only show this section if there was a reason to look (generic-only emails)
+    if (log?.webScrape?.genericEmailsOnly) {
+      return `<div class="log-section"><div class="log-header">Decision-maker search: not attempted</div><div class="log-item log-skipped">└─ No Hunter API key to search for decision-makers</div></div>`;
+    }
+    return '';
+  }
+  const dm = log.decisionMakerSearch;
+  if (dm.error) {
+    return `<div class="log-section"><div class="log-header">Decision-maker search: ✗ failed</div><div class="log-item log-skipped">└─ ${escapeHtml(dm.error)}</div></div>`;
+  }
+  let html = `<div class="log-section"><div class="log-header">Decision-maker search: ${dm.found || 0} email${(dm.found || 0) !== 1 ? 's' : ''} derived</div>`;
+  if (dm.pattern) html += `<div class="log-item">├─ Pattern detected: ${escapeHtml(dm.pattern)}</div>`;
+  if (dm.source) html += `<div class="log-item">├─ Derived from: ${escapeHtml(dm.source)}</div>`;
+  if (dm.found > 0) html += `<div class="log-item">└─ Applied pattern to generate CEO/founder emails</div>`;
+  html += '</div>';
+  return html;
 }
 
 function escapeHtml(str) {
@@ -1472,8 +1801,122 @@ function formatSegmentBadge(segment, enrichmentSource) {
   if (!segment && !enrichmentSource) return '-';
   if (!segment) return `<span class="enrichment-badge pending">Pending</span>`;
 
-  const segmentClass = segment.toLowerCase().replace(/[^a-z]/g, '-');
-  return `<span class="segment-badge ${segmentClass}">${escapeHtml(segment)}</span>`;
+  const colors = SEGMENT_COLORS[segment] || SEGMENT_COLORS['Other'];
+  return `<span class="segment-badge" style="background:${colors.bg};color:${colors.text}">${escapeHtml(segment)}</span>`;
+}
+
+function getContactTier(company) {
+  if (!company.primary_email) return 'none';
+
+  const email = company.primary_email.toLowerCase();
+  const genericPrefixes = ['info@', 'kontakt@', 'contact@', 'office@', 'support@', 'sales@', 'hello@', 'obchod@', 'noreply@', 'poptavka@', 'recepce@', 'fakturace@', 'admin@', 'marketing@', 'webmaster@', 'general@', 'team@'];
+  if (genericPrefixes.some(p => email.startsWith(p))) return 'generic';
+
+  const title = (company.primary_contact_title || '').toLowerCase();
+  if (/\b(ceo|founder|co-founder|owner|director|managing|president|jednatel|majitel|zakladatel|ředitel|společník|partner)\b/.test(title)) return 'ceo';
+
+  return 'named';
+}
+
+function formatContactCell(company) {
+  const tier = getContactTier(company);
+  if (tier === 'none') return '<span style="color:#9CA3AF">-</span>';
+
+  const tierConfig = {
+    ceo: { label: 'CEO', cls: 'tier-ceo' },
+    named: { label: 'Named', cls: 'tier-named' },
+    generic: { label: 'Generic', cls: 'tier-generic' }
+  };
+  const config = tierConfig[tier];
+  const email = escapeHtml(company.primary_email);
+  const truncated = email.length > 25 ? email.substring(0, 22) + '...' : email;
+
+  return `<span class="contact-tier-badge ${config.cls} clickable" data-company-id="${company.id}">${config.label}</span><a href="mailto:${email}" class="contact-email-link" title="${email}">${truncated}</a>`;
+}
+
+// Tier popover for switching primary contact
+async function showTierPopover(companyId, badgeEl) {
+  // Close any existing popover
+  closeTierPopover();
+
+  try {
+    const res = await fetch(`/api/companies/${companyId}/contacts`);
+    const contacts = await res.json();
+
+    if (!contacts.length) return;
+
+    const popover = document.createElement('div');
+    popover.id = 'tier-popover';
+    popover.className = 'tier-popover';
+    popover.innerHTML = `
+      <div class="tier-popover-header">Switch Primary Contact</div>
+      ${contacts.map(c => {
+        const tierCls = getContactTierFromContact(c);
+        const tierLabel = { ceo: 'CEO', named: 'Named', generic: 'Generic' }[tierCls] || 'Named';
+        return `
+          <label class="tier-popover-row ${c.is_primary ? 'active' : ''}" data-contact-id="${c.id}">
+            <input type="radio" name="primary-contact" value="${c.id}" ${c.is_primary ? 'checked' : ''}>
+            <span class="contact-tier-badge ${tierCls === 'ceo' ? 'tier-ceo' : tierCls === 'generic' ? 'tier-generic' : 'tier-named'}">${tierLabel}</span>
+            <span class="tier-popover-name">${escapeHtml(c.full_name || c.email)}</span>
+            <span class="tier-popover-email">${escapeHtml(c.email)}</span>
+          </label>`;
+      }).join('')}
+    `;
+
+    // Position next to the badge
+    const rect = badgeEl.getBoundingClientRect();
+    popover.style.top = `${rect.bottom + window.scrollY + 4}px`;
+    popover.style.left = `${rect.left + window.scrollX}px`;
+    document.body.appendChild(popover);
+
+    // Handle radio change
+    popover.querySelectorAll('input[name="primary-contact"]').forEach(radio => {
+      radio.addEventListener('change', async () => {
+        const contactId = radio.value;
+        try {
+          await fetch(`/api/contacts/${contactId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_primary: true })
+          });
+          closeTierPopover();
+          await loadCompanies(currentSearchId);
+        } catch (err) {
+          console.error('Failed to switch primary:', err);
+        }
+      });
+    });
+
+    // Close on outside click
+    setTimeout(() => {
+      document.addEventListener('click', closeTierPopoverOnOutsideClick);
+    }, 0);
+  } catch (err) {
+    console.error('Failed to load contacts:', err);
+  }
+}
+
+function getContactTierFromContact(contact) {
+  if (!contact.email) return 'none';
+  const email = contact.email.toLowerCase();
+  const genericPrefixes = ['info@', 'kontakt@', 'contact@', 'office@', 'support@', 'sales@', 'hello@', 'webmaster@', 'general@', 'team@'];
+  if (genericPrefixes.some(p => email.startsWith(p))) return 'generic';
+  const title = (contact.title || '').toLowerCase();
+  if (/\b(ceo|founder|co-founder|owner|director|managing|president|jednatel|majitel|zakladatel|ředitel|společník|partner)\b/.test(title)) return 'ceo';
+  return 'named';
+}
+
+function closeTierPopover() {
+  const existing = document.getElementById('tier-popover');
+  if (existing) existing.remove();
+  document.removeEventListener('click', closeTierPopoverOnOutsideClick);
+}
+
+function closeTierPopoverOnOutsideClick(e) {
+  const popover = document.getElementById('tier-popover');
+  if (popover && !popover.contains(e.target) && !e.target.classList.contains('contact-tier-badge')) {
+    closeTierPopover();
+  }
 }
 
 function formatStageStatus(stage, enrichmentError) {
@@ -1505,6 +1948,7 @@ async function updatePipelineStats() {
     document.getElementById('stat-enriched').textContent = pipelineStats.enriched || 0;
     document.getElementById('stat-qualified').textContent = pipelineStats.qualified || 0;
     document.getElementById('stat-ready').textContent = pipelineStats.ready || 0;
+    document.getElementById('stat-parked').textContent = pipelineStats.parked || 0;
 
     updateMainActionButton();
     updatePushNotionButton();
@@ -1538,6 +1982,11 @@ function updateMainActionButton() {
     return;
   }
 
+  // Count no-website companies in selection
+  const selectedNoWebsite = selectedCompanies.filter(c =>
+    !c.website || c.pipeline_stage === 'no_website'
+  ).length;
+
   // Determine action based on selected leads' stages
   if (selectedRaw > 0) {
     btn.classList.add('enrich');
@@ -1549,6 +1998,10 @@ function updateMainActionButton() {
     btnText.textContent = `✓ Approve (${selectedEnriched})`;
     btn.disabled = false;
     btn.dataset.action = 'approve';
+  } else if (selectedNoWebsite > 0 && activeStageFilter === 'no_website') {
+    btnText.textContent = `Park (${selectedNoWebsite})`;
+    btn.disabled = false;
+    btn.dataset.action = 'park';
   } else {
     btnText.textContent = `${selectedCount} selected`;
     btn.disabled = true;
@@ -1579,68 +2032,87 @@ function updatePushNotionButton() {
 }
 
 function handleProgressClick(stage) {
-  // Toggle filter: clicking the active stage clears the filter
-  activeStageFilter = (activeStageFilter === stage) ? '' : stage;
-
   // Update active state on pills
-  // When no filter is active, default to showing "raw" as the active pill
-  const activePillStage = activeStageFilter || 'raw';
   document.querySelectorAll('.stage-pill').forEach(pill => {
-    pill.classList.toggle('active', pill.dataset.stage === activePillStage);
+    pill.classList.toggle('active', pill.dataset.stage === stage);
   });
 
-  applyFilters();
+  // Load ALL companies in this stage (global view)
+  loadCompaniesByStage(stage);
 }
 
+let enrichmentRunningBulk = false;
 async function handleMainAction() {
   const btn = document.getElementById('main-action-btn');
   const action = btn.dataset.action;
 
   if (action === 'enrich') {
-    await handleEnrichSelected();
+    if (enrichmentRunningBulk) return;
+    enrichmentRunningBulk = true;
+    try { await handleEnrichSelected(); } finally { enrichmentRunningBulk = false; }
   } else if (action === 'approve') {
     await handleApproveSelected();
+  } else if (action === 'park') {
+    await handleBulkMove('parked');
   }
 }
 
 async function handleEnrichSelected() {
-  const selectedCompanies = companies.filter(c =>
+  // First try raw companies
+  let selectedCompanies = companies.filter(c =>
     selectedIds.has(c.id) &&
     c.website &&
     (!c.pipeline_stage || c.pipeline_stage === 'raw')
   );
 
+  // If no raw leads but some already-enriched leads are selected, offer re-enrichment
   if (!selectedCompanies.length) {
-    alert('No raw leads selected to enrich.');
-    return;
+    const enrichedSelected = companies.filter(c =>
+      selectedIds.has(c.id) && c.website && c.enrichment_source
+    );
+    if (enrichedSelected.length > 0 && confirm(`Re-enrich ${enrichedSelected.length} already-enriched lead${enrichedSelected.length > 1 ? 's' : ''}? This will re-scrape and overwrite existing data.`)) {
+      selectedCompanies = enrichedSelected;
+    } else {
+      alert('No leads selected to enrich.');
+      return;
+    }
   }
 
   const btn = document.getElementById('main-action-btn');
   const btnText = document.getElementById('main-action-text');
   btn.disabled = true;
-  btnText.innerHTML = '<span class="spinner"></span> Enriching...';
 
-  // Process each selected company with inline status updates
-  for (const company of selectedCompanies) {
-    setRowStatus(company.id, 'Enriching...', 'processing');
+  // Process in parallel batches of 3
+  const BATCH_SIZE = 3;
+  let done = 0;
+  const total = selectedCompanies.length;
+  btnText.innerHTML = `<span class="spinner"></span> Enriching 0/${total}...`;
 
-    try {
-      const res = await fetch(`/api/companies/${company.id}/enrich-full`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
+  for (let i = 0; i < selectedCompanies.length; i += BATCH_SIZE) {
+    const batch = selectedCompanies.slice(i, i + BATCH_SIZE);
+    batch.forEach(c => setRowStatus(c.id, 'Enriching...', 'processing'));
 
-      if (res.ok) {
-        setRowStatus(company.id, '✓ Done', 'done');
-      } else {
-        const err = await res.json();
+    await Promise.all(batch.map(async (company) => {
+      try {
+        const res = await fetch(`/api/companies/${company.id}/enrich-full`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+        if (res.ok) {
+          setRowStatus(company.id, '✓ Done', 'done');
+        } else {
+          const err = await res.json();
+          setRowStatus(company.id, '✗ Error', 'error');
+          console.error(`Enrich failed for ${company.name}:`, err);
+        }
+      } catch (err) {
         setRowStatus(company.id, '✗ Error', 'error');
         console.error(`Enrich failed for ${company.name}:`, err);
       }
-    } catch (err) {
-      setRowStatus(company.id, '✗ Error', 'error');
-      console.error(`Enrich failed for ${company.name}:`, err);
-    }
+      done++;
+      btnText.innerHTML = `<span class="spinner"></span> Enriching ${done}/${total}...`;
+    }));
   }
 
   // Reload and update
@@ -1791,9 +2263,11 @@ async function handleDedupe() {
   dedupeLoading.classList.remove('hidden');
 
   try {
+    const body = selectedIds.size > 0 ? { companyIds: Array.from(selectedIds) } : {};
     const res = await fetch(`/api/notion/dedupe/search/${currentSearchId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
