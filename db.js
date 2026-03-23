@@ -209,6 +209,21 @@ function upsertCompany(company, searchId) {
     VALUES (?, ?)
   `).run(searchId, companyId);
 
+  // Auto-assign pipeline stage based on website presence
+  if (!company.website) {
+    // No website → move to no_website (only if still in raw/null stage)
+    db.prepare(`
+      UPDATE companies SET pipeline_stage = 'no_website'
+      WHERE id = ? AND (pipeline_stage = 'raw' OR pipeline_stage IS NULL)
+    `).run(companyId);
+  } else if (existing) {
+    // Existing company now has a website but was in no_website → move back to raw
+    db.prepare(`
+      UPDATE companies SET pipeline_stage = 'raw'
+      WHERE id = ? AND pipeline_stage = 'no_website'
+    `).run(companyId);
+  }
+
   return { companyId, isNew: !existing };
 }
 
