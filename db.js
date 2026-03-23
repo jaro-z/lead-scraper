@@ -115,6 +115,9 @@ addColumnIfMissing('companies', 'enrichment_error', 'TEXT');
 // Migration: Remove 'review' stage - move to 'enriched'
 db.exec(`UPDATE companies SET pipeline_stage = 'enriched' WHERE pipeline_stage = 'review'`);
 
+// Migration: Fix companies without website stuck in 'raw' stage
+db.exec(`UPDATE companies SET pipeline_stage = 'no_website' WHERE (pipeline_stage = 'raw' OR pipeline_stage IS NULL) AND (website IS NULL OR website = '')`);
+
 // Contact enrichment columns
 addColumnIfMissing('contacts', 'phone', 'TEXT');
 addColumnIfMissing('contacts', 'email_valid', 'INTEGER');
@@ -538,7 +541,11 @@ function getCompaniesByStage(stage) {
  * Get pipeline statistics (count of companies per stage)
  * @returns {Object} Counts by stage
  */
-function getPipelineStats() {
+function getPipelineStats(searchId) {
+  const join = searchId ? 'JOIN search_companies sc ON c.id = sc.company_id' : '';
+  const where = searchId ? 'WHERE sc.search_id = ?' : '';
+  const params = searchId ? [searchId] : [];
+
   const stats = db.prepare(`
     SELECT
       SUM(CASE WHEN (pipeline_stage = 'raw' OR pipeline_stage IS NULL) AND website IS NOT NULL AND website != '' THEN 1 ELSE 0 END) as raw,
@@ -549,8 +556,10 @@ function getPipelineStats() {
       SUM(CASE WHEN in_notion = 1 THEN 1 ELSE 0 END) as in_notion,
       SUM(CASE WHEN pipeline_stage = 'parked' THEN 1 ELSE 0 END) as parked,
       COUNT(*) as total
-    FROM companies
-  `).get();
+    FROM companies c
+    ${join}
+    ${where}
+  `).get(...params);
 
   return {
     raw: stats.raw || 0,
@@ -565,28 +574,33 @@ function getPipelineStats() {
 }
 
 /**
- * Get all companies by pipeline stage (global, across all searches)
+ * Get companies by pipeline stage, optionally scoped to a search
  * Uses same logic as getPipelineStats() so counts match
  * @param {string} stage - Pipeline stage to filter by
+ * @param {number} [searchId] - Optional search ID to scope results
  * @returns {Array} Companies matching the stage
  */
-function getCompaniesByStage(stage) {
+function getCompaniesByStage(stage, searchId) {
   const validStages = ['raw', 'no_website', 'enriched', 'qualified', 'ready', 'parked'];
   if (!validStages.includes(stage)) {
     throw new Error(`Invalid pipeline stage: ${stage}`);
   }
 
-  let whereClause;
+  let stageClause;
   switch (stage) {
     case 'raw':
-      whereClause = "(pipeline_stage = 'raw' OR pipeline_stage IS NULL) AND website IS NOT NULL AND website != ''";
+      stageClause = "(c.pipeline_stage = 'raw' OR c.pipeline_stage IS NULL) AND c.website IS NOT NULL AND c.website != ''";
       break;
     case 'no_website':
-      whereClause = "pipeline_stage = 'no_website' OR ((pipeline_stage IS NULL OR pipeline_stage = 'raw') AND (website IS NULL OR website = ''))";
+      stageClause = "c.pipeline_stage = 'no_website' OR ((c.pipeline_stage IS NULL OR c.pipeline_stage = 'raw') AND (c.website IS NULL OR c.website = ''))";
       break;
     default:
-      whereClause = `pipeline_stage = '${stage}'`;
+      stageClause = `c.pipeline_stage = '${stage}'`;
   }
+
+  const searchJoin = searchId ? 'JOIN search_companies sc ON c.id = sc.company_id' : '';
+  const searchWhere = searchId ? 'AND sc.search_id = ?' : '';
+  const params = searchId ? [searchId] : [];
 
   return db.prepare(`
     SELECT c.*,
@@ -594,10 +608,12 @@ function getCompaniesByStage(stage) {
       pc.title as primary_contact_title,
       pc.first_name as primary_contact_first_name
     FROM companies c
+    ${searchJoin}
     LEFT JOIN contacts pc ON pc.company_id = c.id AND pc.is_primary = 1
-    WHERE ${whereClause}
+    WHERE (${stageClause})
+    ${searchWhere}
     ORDER BY c.name ASC
-  `).all();
+  `).all(...params);
 }
 
 /**

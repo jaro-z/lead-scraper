@@ -606,7 +606,7 @@ describe('Contact Waterfall - contactWaterfall.js', () => {
 // ============================================================================
 
 describe('Web Scraper Helpers - webScraper.js', () => {
-  const { cleanHtml, deduplicateContacts, findTeamPageUrls, TEAM_PAGE_PATTERNS, isGenericEmail } = require('../enrichment/webScraper');
+  const { cleanHtml, deduplicateContacts, findTeamPageUrls, TEAM_PAGE_PATTERNS, isGenericEmail, CONTACT_URL_SUFFIXES } = require('../enrichment/webScraper');
 
   describe('Person-Associated Generic Email Handling', () => {
     it('should identify generic emails correctly with isGenericEmail()', () => {
@@ -815,6 +815,139 @@ describe('Web Scraper Helpers - webScraper.js', () => {
       assert.ok(TEAM_PAGE_PATTERNS.includes('/team'));
       assert.ok(TEAM_PAGE_PATTERNS.includes('/about'));
       assert.ok(TEAM_PAGE_PATTERNS.includes('/contact'));
+    });
+  });
+
+  describe('CONTACT_URL_SUFFIXES', () => {
+    it('should include common Czech contact page patterns', () => {
+      assert.ok(CONTACT_URL_SUFFIXES.includes('/kontakt'));
+      assert.ok(CONTACT_URL_SUFFIXES.includes('/kontakty'));
+    });
+
+    it('should include common English contact page patterns', () => {
+      assert.ok(CONTACT_URL_SUFFIXES.includes('/contact'));
+      assert.ok(CONTACT_URL_SUFFIXES.includes('/contact-us'));
+      assert.ok(CONTACT_URL_SUFFIXES.includes('/contacts'));
+    });
+
+    it('should include German contact page patterns', () => {
+      assert.ok(CONTACT_URL_SUFFIXES.includes('/kontakte'));
+    });
+  });
+
+  describe('Contact Page Injection Logic', () => {
+    it('should match contact URLs using endsWith for multilingual support', () => {
+      const testUrls = [
+        'https://example.cz/cs/kontakt',
+        'https://example.cz/de/kontakt',
+        'https://example.cz/en/contact',
+        'https://example.cz/kontakt',
+        'https://example.cz/contact-us',
+      ];
+
+      for (const url of testUrls) {
+        const pathname = new URL(url).pathname.toLowerCase().replace(/\/$/, '');
+        const matches = CONTACT_URL_SUFFIXES.some(suffix => pathname.endsWith(suffix));
+        assert.ok(matches, `Should match: ${url}`);
+      }
+    });
+
+    it('should NOT match contact page subpages', () => {
+      const testUrls = [
+        'https://example.cz/kontakt/formular',
+        'https://example.cz/kontakt/thanks',
+        'https://example.cz/contact/success',
+        'https://example.cz/kontakt/mapa',
+      ];
+
+      for (const url of testUrls) {
+        const pathname = new URL(url).pathname.toLowerCase().replace(/\/$/, '');
+        const matches = CONTACT_URL_SUFFIXES.some(suffix => pathname.endsWith(suffix));
+        assert.ok(!matches, `Should NOT match: ${url}`);
+      }
+    });
+
+    it('should handle trailing slashes correctly', () => {
+      const url = 'https://example.cz/kontakt/';
+      const pathname = new URL(url).pathname.toLowerCase().replace(/\/$/, '');
+      const matches = CONTACT_URL_SUFFIXES.some(suffix => pathname.endsWith(suffix));
+      assert.ok(matches, 'Should match /kontakt/ after trailing slash removal');
+    });
+
+    it('should inject contact page when not in ranked pages', () => {
+      const rankedPages = [
+        { url: 'https://example.cz/o-nas', category: 'ABOUT' },
+        { url: 'https://example.cz/tym', category: 'TEAM' },
+        { url: 'https://example.cz/', category: 'ABOUT' },
+      ];
+      const allUrls = [
+        'https://example.cz/',
+        'https://example.cz/o-nas',
+        'https://example.cz/tym',
+        'https://example.cz/kontakt',
+        'https://example.cz/sluzby',
+      ];
+
+      // Simulate the injection logic from scrapeTeamPages (pathname-based dedup)
+      const hasContactPage = rankedPages.some(p => p.category === 'CONTACT');
+      assert.strictEqual(hasContactPage, false, 'No CONTACT page in ranked');
+
+      const rankedPathnames = new Set(rankedPages.map(p => {
+        try { return new URL(p.url).pathname.toLowerCase().replace(/\/$/, ''); }
+        catch { return p.url.toLowerCase(); }
+      }));
+      const contactUrl = allUrls.find(url => {
+        try {
+          const pathname = new URL(url).pathname.toLowerCase().replace(/\/$/, '');
+          if (rankedPathnames.has(pathname)) return false;
+          return CONTACT_URL_SUFFIXES.some(suffix => pathname.endsWith(suffix));
+        } catch { return false; }
+      });
+
+      assert.strictEqual(contactUrl, 'https://example.cz/kontakt');
+    });
+
+    it('should NOT inject duplicate when contact URL already ranked under different category', () => {
+      const rankedPages = [
+        { url: 'https://example.cz/o-nas', category: 'ABOUT' },
+        { url: 'https://example.cz/kontakt', category: 'ABOUT' }, // Claude labeled it ABOUT
+        { url: 'https://example.cz/', category: 'ABOUT' },
+      ];
+      const allUrls = [
+        'https://example.cz/',
+        'https://example.cz/o-nas',
+        'https://example.cz/kontakt',
+        'https://example.cz/sluzby',
+      ];
+
+      const hasContactPage = rankedPages.some(p => p.category === 'CONTACT');
+      assert.strictEqual(hasContactPage, false, 'No CONTACT category');
+
+      // Pathname-based dedup (matches implementation)
+      const rankedPathnames = new Set(rankedPages.map(p => {
+        try { return new URL(p.url).pathname.toLowerCase().replace(/\/$/, ''); }
+        catch { return p.url.toLowerCase(); }
+      }));
+      const contactUrl = allUrls.find(url => {
+        try {
+          const pathname = new URL(url).pathname.toLowerCase().replace(/\/$/, '');
+          if (rankedPathnames.has(pathname)) return false;
+          return CONTACT_URL_SUFFIXES.some(suffix => pathname.endsWith(suffix));
+        } catch { return false; }
+      });
+
+      assert.strictEqual(contactUrl, undefined, 'Should not find a contact URL since /kontakt is already ranked');
+    });
+
+    it('should skip injection when CONTACT already in ranked pages', () => {
+      const rankedPages = [
+        { url: 'https://example.cz/o-nas', category: 'ABOUT' },
+        { url: 'https://example.cz/kontakt', category: 'CONTACT' },
+        { url: 'https://example.cz/', category: 'ABOUT' },
+      ];
+
+      const hasContactPage = rankedPages.some(p => p.category === 'CONTACT');
+      assert.strictEqual(hasContactPage, true, 'CONTACT already present');
     });
   });
 });

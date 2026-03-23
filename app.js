@@ -384,26 +384,35 @@ async function loadCompanies(searchId) {
   }
 }
 
-async function loadCompaniesByStage(stage) {
+async function loadCompaniesByStage(stage, searchId) {
   try {
-    const res = await fetch(`/api/companies/by-stage/${stage}`);
+    const url = searchId
+      ? `/api/companies/by-stage/${stage}?searchId=${searchId}`
+      : `/api/companies/by-stage/${stage}`;
+    const res = await fetch(url);
     companies = await res.json();
     filteredCompanies = [...companies];
-    isGlobalView = true;
     activeStageFilter = stage;
-    currentSearchId = null; // Clear search context
 
-    // Update title to show global view
-    const stageLabels = {
-      raw: 'Raw',
-      no_website: 'No Website',
-      enriched: 'Enriched',
-      qualified: 'Qualified',
-      ready: 'Ready',
-      parked: 'Parked'
-    };
-    document.getElementById('search-title').textContent = `All ${stageLabels[stage]} Companies`;
-    document.getElementById('search-meta').textContent = `${companies.length} companies across all searches`;
+    if (searchId) {
+      // Stay scoped to the search
+      isGlobalView = false;
+    } else {
+      isGlobalView = true;
+      currentSearchId = null;
+
+      // Update title to show global view
+      const stageLabels = {
+        raw: 'Raw',
+        no_website: 'No Website',
+        enriched: 'Enriched',
+        qualified: 'Qualified',
+        ready: 'Ready',
+        parked: 'Parked'
+      };
+      document.getElementById('search-title').textContent = `All ${stageLabels[stage]} Companies`;
+      document.getElementById('search-meta').textContent = `${companies.length} companies across all searches`;
+    }
 
     // Make sure results view is visible
     dashboardView.classList.add('hidden');
@@ -1961,7 +1970,8 @@ function formatStageStatus(stage, enrichmentError) {
 
 async function updatePipelineStats() {
   try {
-    const res = await fetch('/api/companies/stats');
+    const url = currentSearchId ? `/api/companies/stats?searchId=${currentSearchId}` : '/api/companies/stats';
+    const res = await fetch(url);
     pipelineStats = await res.json();
 
     // Update labels for pipeline: Raw → No Website → Enriched → Qualified → Ready
@@ -2059,8 +2069,12 @@ function handleProgressClick(stage) {
     pill.classList.toggle('active', pill.dataset.stage === stage);
   });
 
-  // Load ALL companies in this stage (global view)
-  loadCompaniesByStage(stage);
+  // Scope to current search if viewing one, otherwise global
+  if (currentSearchId) {
+    loadCompaniesByStage(stage, currentSearchId);
+  } else {
+    loadCompaniesByStage(stage);
+  }
 }
 
 let enrichmentRunningBulk = false;

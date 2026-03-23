@@ -24,6 +24,13 @@ const anthropic = new Anthropic();
 // Page category constants for logging
 const PAGE_CATEGORIES = ['TEAM', 'CONTACT', 'ABOUT'];
 
+// Contact page URL suffixes for pattern matching (Czech + English + German)
+const CONTACT_URL_SUFFIXES = [
+  '/kontakt', '/contact', '/kontakty', '/contact-us',
+  '/contacts', '/kontakte', '/kontakta', '/get-in-touch',
+  '/napiste-nam'
+];
+
 // Generic email prefixes to filter out (not personal contacts)
 const GENERIC_EMAIL_PREFIXES = [
   'info@', 'kontakt@', 'contact@', 'office@', 'support@',
@@ -719,6 +726,29 @@ async function scrapeTeamPages(domain, options = {}) {
 
   // Step 2: Use AI to rank top 3 pages (Team > About > Contact)
   let rankedPages = await rankBestPages(allUrls);
+
+  // Step 2.25: Ensure at least one CONTACT page is included (bonus 4th scrape)
+  const hasContactPage = rankedPages.some(p => p.category === 'CONTACT');
+  if (!hasContactPage && rankedPages.length > 0) {
+    // Normalize to pathnames to handle AI returning different URL formats
+    const rankedPathnames = new Set(rankedPages.map(p => {
+      try { return new URL(p.url).pathname.toLowerCase().replace(/\/$/, ''); }
+      catch { return p.url.toLowerCase(); }
+    }));
+    const contactUrl = allUrls.find(url => {
+      try {
+        const pathname = new URL(url).pathname.toLowerCase().replace(/\/$/, '');
+        if (rankedPathnames.has(pathname)) return false; // skip URLs already ranked (avoids duplicates)
+        return CONTACT_URL_SUFFIXES.some(suffix => pathname.endsWith(suffix));
+      } catch { return false; }
+    });
+
+    if (contactUrl) {
+      rankedPages.push({ url: contactUrl, category: 'CONTACT' });
+      console.log(`[WebScraper] Added CONTACT page: ${contactUrl} (bonus scrape)`);
+    }
+  }
+
   log.pagesRanked = rankedPages.map(p => ({ url: p.url, category: p.category }));
 
   // Step 2.5: Fallback to homepage if no relevant pages found
@@ -738,10 +768,12 @@ async function scrapeTeamPages(domain, options = {}) {
   }
 
   // Step 3: Scrape ALL ranked pages and collect contacts
+  // Allow bonus contact page to exceed maxAttempts by 1
+  const scrapeLimit = Math.min(rankedPages.length, maxAttempts + (hasContactPage ? 0 : 1));
   let allContactsRaw = [];
   let allGenericEmails = [];
 
-  for (let i = 0; i < Math.min(rankedPages.length, maxAttempts); i++) {
+  for (let i = 0; i < scrapeLimit; i++) {
     const page = rankedPages[i];
     console.log(`[WebScraper] Scraping page ${i + 1}/${rankedPages.length}: ${page.category} - ${page.url}`);
 
@@ -833,6 +865,60 @@ async function scrapeTeamPages(domain, options = {}) {
       }
     } catch (rawErr) {
       console.warn(`[WebScraper] Raw HTTP fetch failed: ${rawErr.message}`);
+    }
+
+    // Step 3.6: Also try raw HTTP fetch of contact page URLs (FREE, no Firecrawl credits)
+    // Always run — multilingual sites may have different contacts on different language pages
+    // Exclude pages already successfully scraped (but retry failed ones)
+    const scrapedUrls = new Set(log.pagesScraped.filter(p => p.status !== 'error').map(p => p.url));
+    const contactPageUrls = allUrls.filter(url => {
+      if (scrapedUrls.has(url)) return false;
+      try {
+        const pathname = new URL(url).pathname.toLowerCase().replace(/\/$/, '');
+        return CONTACT_URL_SUFFIXES.some(suffix => pathname.endsWith(suffix));
+      } catch { return false; }
+    }).slice(0, 2); // limit to 2 contact page attempts
+
+    for (const contactPageUrl of contactPageUrls) {
+      try {
+        console.log(`[WebScraper] Trying raw HTTP fetch of contact page: ${contactPageUrl}`);
+        const contactRes = await fetch(contactPageUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeadScraper/1.0)' },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(15000)
+        });
+        const contactHtml = await contactRes.text();
+
+        if (contactHtml.length > 500) {
+          const contactPageLog = { url: contactPageUrl, category: 'CONTACT (raw fetch)', status: 'pending', contactsFound: 0, genericEmails: [] };
+
+          let contactContacts = await extractContactsWithClaude(contactHtml, { keepGeneric: true });
+          for (const c of contactContacts) {
+            log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: contactPageUrl + ' (raw)' });
+          }
+
+          const contactEmails = extractEmailsFromHtmlWithGeneric(contactHtml);
+          for (const email of contactEmails.generic) {
+            if (!allGenericEmails.includes(email)) {
+              allGenericEmails.push(email);
+              contactPageLog.genericEmails.push(email);
+            }
+          }
+
+          contactContacts = verifyAndAddMissedContacts(contactContacts, contactHtml);
+          contactPageLog.contactsFound = contactContacts.length;
+          contactPageLog.status = contactContacts.length > 0 ? 'success' : 'no_contacts';
+
+          if (contactContacts.length > 0) {
+            console.log(`[WebScraper] Raw contact page fetch found ${contactContacts.length} contacts!`);
+          }
+
+          allContactsRaw.push(...contactContacts);
+          log.pagesScraped.push(contactPageLog);
+        }
+      } catch (contactErr) {
+        console.warn(`[WebScraper] Raw HTTP fetch of contact page failed: ${contactErr.message}`);
+      }
     }
   }
 
@@ -1030,5 +1116,6 @@ module.exports = {
   sanitizeEmail,
   isCompanyPatternEmail,
   GENERIC_EMAIL_PREFIXES,
-  PAGE_CATEGORIES
+  PAGE_CATEGORIES,
+  CONTACT_URL_SUFFIXES
 };

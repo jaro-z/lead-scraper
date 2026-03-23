@@ -261,14 +261,18 @@ app.get('/api/companies', asyncHandler((req, res) => {
 }));
 
 // Pipeline stats - must be before /api/companies/:id
+// Pass ?searchId=N to scope to a specific search
 app.get('/api/companies/stats', asyncHandler(async (req, res) => {
-  const stats = db.getPipelineStats();
+  const searchId = req.query.searchId ? parseInt(req.query.searchId) : null;
+  const stats = db.getPipelineStats(searchId);
   res.json(stats);
 }));
 
-// Get companies by pipeline stage (global, across all searches)
+// Get companies by pipeline stage, optionally scoped to a search
+// Pass ?searchId=N to scope to a specific search
 app.get('/api/companies/by-stage/:stage', asyncHandler((req, res) => {
-  res.json(db.getCompaniesByStage(req.params.stage));
+  const searchId = req.query.searchId ? parseInt(req.query.searchId) : null;
+  res.json(db.getCompaniesByStage(req.params.stage, searchId));
 }));
 
 app.get('/api/companies/:id', asyncHandler((req, res) => {
