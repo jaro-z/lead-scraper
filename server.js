@@ -490,7 +490,7 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
   // Step 3: Discover and process contacts
   let contactResult = null;
   await runEnrichmentStep('discoverContacts', result, async () => {
-    contactResult = await discoverContacts(company.id, domain, HUNTER_API_KEY);
+    contactResult = await discoverContacts(company.id, domain, HUNTER_API_KEY, { originalUrl: company.website });
     const contacts = contactResult.contacts || [];
 
     // Save only contacts with emails (DB requires email NOT NULL)
@@ -638,7 +638,7 @@ app.post('/api/companies/enrich-batch', batchEnrichLimiter, asyncHandler(async (
         }
       }
 
-      const contactResult = await discoverContacts(company.id, domain, HUNTER_API_KEY);
+      const contactResult = await discoverContacts(company.id, domain, HUNTER_API_KEY, { originalUrl: company.website });
       // Save only contacts with emails (DB requires email NOT NULL)
       const contactsWithEmail = (contactResult.contacts || []).filter(c => c.email);
       if (contactsWithEmail.length > 0) {

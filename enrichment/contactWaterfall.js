@@ -226,7 +226,7 @@ function applyDerivedPattern(derivedPattern, contact, domain) {
  * @param {string} hunterApiKey - Hunter.io API key for paid fallback
  * @returns {Promise<{source: 'web_scrape'|'hunter'|null, contacts: Array, log: Object}>}
  */
-async function discoverContacts(companyId, domain, hunterApiKey) {
+async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
   // Initialize combined log
   const log = {
     source: null,
@@ -238,6 +238,10 @@ async function discoverContacts(companyId, domain, hunterApiKey) {
     return { source: null, contacts: [], companyId, log, error: 'No domain provided' };
   }
 
+  // Detect preferred protocol from original URL (HTTP-only sites are common for older Czech businesses)
+  const preferredProtocol = options.originalUrl && options.originalUrl.startsWith('http://')
+    ? 'http' : 'https';
+
   // Clean domain (remove protocol, www, trailing slashes)
   const cleanDomain = domain
     .replace(/^https?:\/\//, '')
@@ -246,7 +250,7 @@ async function discoverContacts(companyId, domain, hunterApiKey) {
 
   // Step 1: Try web scraping (FREE)
   try {
-    const scrapeResult = await webScraper.scrapeTeamPages(cleanDomain, { returnLog: true });
+    const scrapeResult = await webScraper.scrapeTeamPages(cleanDomain, { returnLog: true, preferredProtocol });
     const scrapedContacts = scrapeResult.contacts || [];
     log.webScrape = scrapeResult.log;
 

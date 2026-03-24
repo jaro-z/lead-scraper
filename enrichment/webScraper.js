@@ -106,11 +106,11 @@ function isCompanyPatternEmail(email) {
  * @param {string} domain - Domain to map (e.g., "company.cz")
  * @returns {Promise<string[]>} - Array of discovered URLs
  */
-async function mapDomain(domain) {
-  console.log(`[Firecrawl] Mapping domain: ${domain}`);
+async function mapDomain(domain, protocol = 'https') {
+  console.log(`[Firecrawl] Mapping domain: ${domain} (${protocol})`);
 
   try {
-    const result = await firecrawl.mapUrl(`https://${domain}`, {
+    const result = await firecrawl.mapUrl(`${protocol}://${domain}`, {
       limit: 100 // Limit to 100 URLs for efficiency
     });
 
@@ -175,6 +175,38 @@ async function fetchPage(url, timeout = 30000) {
   return html;
 }
 
+/**
+ * Try fetching a URL with HTTPS first, then HTTP fallback.
+ * Handles HTTP-only sites (common for older Czech businesses).
+ * @param {string} domain - Bare domain (e.g., 'azadakstav.cz')
+ * @param {string} path - URL path (default: '/')
+ * @param {number} timeout - Request timeout in ms
+ * @param {string} preferredProtocol - Which protocol to try first ('https' or 'http')
+ * @returns {Promise<{html: string, url: string}|null>}
+ */
+async function rawFetchWithFallback(domain, path = '/', timeout = 15000, preferredProtocol = 'https') {
+  const protocols = preferredProtocol === 'http' ? ['http', 'https'] : ['https', 'http'];
+
+  for (const proto of protocols) {
+    try {
+      const url = `${proto}://${domain}${path}`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeadScraper/1.0)' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(timeout)
+      });
+      const html = await res.text();
+      if (html.length > 500) {
+        console.log(`[WebScraper] Raw fetch success: ${url} (${html.length} chars)`);
+        return { html, url };
+      }
+    } catch (err) {
+      console.warn(`[WebScraper] Raw fetch failed for ${proto}://${domain}${path}: ${err.message}`);
+    }
+  }
+  return null;
+}
+
 
 /**
  * Use AI to rank the TOP 3 best pages to scrape for contacts
@@ -237,9 +269,34 @@ If NO pages fit, return: []`
     const ranked = JSON.parse(jsonMatch[0]);
 
     // Filter valid entries and limit to 3
-    const validRanked = ranked
+    let validRanked = ranked
       .filter(r => r.url && r.category)
       .slice(0, 3);
+
+    // Validate ranked URLs against discovered URLs to prevent AI hallucinations
+    // When mapDomain finds few URLs, the AI sometimes invents plausible subpages
+    // that don't actually exist (e.g., /tym, /kontakt) — causing all fetches to fail
+    const discoveredPathnames = new Set(urls.map(u => {
+      try { return new URL(u).pathname.toLowerCase().replace(/\/+$/, '') || '/'; }
+      catch { return null; }
+    }).filter(Boolean));
+    discoveredPathnames.add('/'); // Homepage is always valid
+
+    const beforeCount = validRanked.length;
+    validRanked = validRanked.filter(r => {
+      try {
+        const pathname = new URL(r.url).pathname.toLowerCase().replace(/\/+$/, '') || '/';
+        const exists = discoveredPathnames.has(pathname);
+        if (!exists) {
+          console.warn(`[WebScraper] Filtered hallucinated URL: ${r.url} (not in ${urls.length} discovered URLs)`);
+        }
+        return exists;
+      } catch { return false; }
+    });
+
+    if (beforeCount > validRanked.length) {
+      console.log(`[WebScraper] Filtered ${beforeCount - validRanked.length} hallucinated URLs, ${validRanked.length} remain`);
+    }
 
     console.log(`[WebScraper] AI ranked ${validRanked.length} pages:`, validRanked.map(r => `${r.category}: ${r.url}`));
     return validRanked;
@@ -692,7 +749,7 @@ function hasUsableContacts(contacts) {
  * @returns {Promise<Array|{contacts: Array, log: Object}>}
  */
 async function scrapeTeamPages(domain, options = {}) {
-  const { validateResults = true, maxAttempts = 3, returnLog = false } = options;
+  const { validateResults = true, maxAttempts = 3, returnLog = false, preferredProtocol = 'https' } = options;
 
   // Initialize log object with detailed tracking
   const log = {
@@ -713,7 +770,7 @@ async function scrapeTeamPages(domain, options = {}) {
   console.log(`[WebScraper] Starting scrape for: ${domain}`);
 
   // Step 1: Use /map to discover all URLs (1 credit, fast)
-  const allUrls = await mapDomain(domain);
+  const allUrls = await mapDomain(domain, preferredProtocol);
   log.urlsDiscovered = allUrls.length;
 
   if (allUrls.length === 0) {
@@ -751,20 +808,30 @@ async function scrapeTeamPages(domain, options = {}) {
 
   log.pagesRanked = rankedPages.map(p => ({ url: p.url, category: p.category }));
 
-  // Step 2.5: Fallback to homepage if no relevant pages found
+  // Step 2.5: Fallback to homepage if no relevant pages found, or ensure homepage for small sites
+  const findHomepageUrl = () => allUrls.find(url => {
+    try {
+      const parsed = new URL(url);
+      return parsed.pathname === '/' || parsed.pathname === '';
+    } catch { return false; }
+  }) || `${preferredProtocol}://${domain}`;
+
+  const homepageInRanked = rankedPages.some(p => {
+    try { const pn = new URL(p.url).pathname.replace(/\/+$/, ''); return pn === '' || pn === '/'; }
+    catch { return false; }
+  });
+
   if (rankedPages.length === 0) {
     console.log(`[WebScraper] No team/about/contact pages found, falling back to homepage for ${domain}`);
-    // Find the homepage URL (shortest path, or just the domain)
-    const homepageUrl = allUrls.find(url => {
-      try {
-        const parsed = new URL(url);
-        return parsed.pathname === '/' || parsed.pathname === '';
-      } catch { return false; }
-    }) || `https://${domain}`;
-
+    const homepageUrl = findHomepageUrl();
     rankedPages = [{ url: homepageUrl, category: 'HOMEPAGE' }];
     log.pagesRanked = [{ url: homepageUrl, category: 'HOMEPAGE (fallback)' }];
     log.homepageFallback = true;
+  } else if (allUrls.length <= 3 && !homepageInRanked) {
+    // Small sites (3 or fewer pages) almost always have contact info on the homepage
+    const homepageUrl = findHomepageUrl();
+    rankedPages.push({ url: homepageUrl, category: 'HOMEPAGE' });
+    console.log(`[WebScraper] Small site (${allUrls.length} URLs), adding homepage: ${homepageUrl}`);
   }
 
   // Step 3: Scrape ALL ranked pages and collect contacts
@@ -819,52 +886,83 @@ async function scrapeTeamPages(domain, options = {}) {
     log.pagesScraped.push(pageLog);
   }
 
+  // Step 3.1: If ALL ranked page fetches failed, try homepage directly via Firecrawl
+  const allPagesFailed = log.pagesScraped.length > 0 && log.pagesScraped.every(p => p.status === 'error');
+  if (allPagesFailed) {
+    const homepageUrl = findHomepageUrl();
+    const alreadyTried = log.pagesScraped.some(p => {
+      try { const pn = new URL(p.url).pathname.replace(/\/+$/, ''); return pn === '' || pn === '/'; }
+      catch { return p.url === homepageUrl; }
+    });
+
+    if (!alreadyTried) {
+      console.log(`[WebScraper] All ${log.pagesScraped.length} ranked pages failed, trying homepage: ${homepageUrl}`);
+      const pageLog = { url: homepageUrl, category: 'HOMEPAGE (all-failed fallback)', status: 'pending', contactsFound: 0, genericEmails: [] };
+      try {
+        const html = await fetchPage(homepageUrl);
+        pageLog.status = 'scraped';
+        let contacts = await extractContactsWithClaude(html, { keepGeneric: true });
+        for (const c of contacts) {
+          log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: homepageUrl });
+        }
+        const htmlEmails = extractEmailsFromHtmlWithGeneric(html);
+        for (const email of htmlEmails.generic) {
+          if (!allGenericEmails.includes(email)) {
+            allGenericEmails.push(email);
+            pageLog.genericEmails.push(email);
+          }
+        }
+        contacts = verifyAndAddMissedContacts(contacts, html);
+        pageLog.contactsFound = contacts.length;
+        pageLog.status = contacts.length > 0 ? 'success' : 'no_contacts';
+        allContactsRaw.push(...contacts);
+      } catch (error) {
+        console.warn(`[WebScraper] Homepage fallback also failed: ${error.message}`);
+        pageLog.status = 'error';
+        pageLog.error = error.message;
+      }
+      log.pagesScraped.push(pageLog);
+    }
+  }
+
   // Step 3.5: If Firecrawl found no personal contacts, try raw HTTP fetch of homepage
   // Many modern sites (Next.js, etc.) have CEO data in SSR HTML that gets replaced
   // by lazy-loaded JS during hydration — Firecrawl's JS rendering actually hides it
   const hasPersonalFromFirecrawl = allContactsRaw.some(c => c.email && !isGenericEmail(c.email));
   if (!hasPersonalFromFirecrawl) {
-    try {
-      const homepageUrl = `https://${domain}`;
-      console.log(`[WebScraper] No personal contacts from Firecrawl, trying raw HTTP fetch: ${homepageUrl}`);
-      const rawRes = await fetch(homepageUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeadScraper/1.0)' },
-        redirect: 'follow',
-        signal: AbortSignal.timeout(15000)
-      });
-      const rawHtml = await rawRes.text();
+    // Step 3.5: Try raw HTTP fetch of homepage (with HTTPS→HTTP fallback)
+    console.log(`[WebScraper] No personal contacts from Firecrawl, trying raw HTTP fetch of homepage`);
+    const rawResult = await rawFetchWithFallback(domain, '/', 15000, preferredProtocol);
 
-      if (rawHtml.length > 500) {
-        const rawPageLog = { url: homepageUrl, category: 'HOMEPAGE (raw fetch)', status: 'pending', contactsFound: 0, genericEmails: [] };
+    if (rawResult) {
+      const { html: rawHtml, url: homepageUrl } = rawResult;
+      const rawPageLog = { url: homepageUrl, category: 'HOMEPAGE (raw fetch)', status: 'pending', contactsFound: 0, genericEmails: [] };
 
-        // Extract contacts from raw SSR HTML
-        let rawContacts = await extractContactsWithClaude(rawHtml, { keepGeneric: true });
-        for (const c of rawContacts) {
-          log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: homepageUrl + ' (raw)' });
-        }
-
-        // Backup: regex email extraction
-        const rawEmails = extractEmailsFromHtmlWithGeneric(rawHtml);
-        for (const email of rawEmails.generic) {
-          if (!allGenericEmails.includes(email)) {
-            allGenericEmails.push(email);
-            rawPageLog.genericEmails.push(email);
-          }
-        }
-
-        rawContacts = verifyAndAddMissedContacts(rawContacts, rawHtml);
-        rawPageLog.contactsFound = rawContacts.length;
-        rawPageLog.status = rawContacts.length > 0 ? 'success' : 'no_contacts';
-
-        if (rawContacts.length > 0) {
-          console.log(`[WebScraper] Raw fetch found ${rawContacts.length} contacts!`);
-        }
-
-        allContactsRaw.push(...rawContacts);
-        log.pagesScraped.push(rawPageLog);
+      // Extract contacts from raw SSR HTML
+      let rawContacts = await extractContactsWithClaude(rawHtml, { keepGeneric: true });
+      for (const c of rawContacts) {
+        log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: homepageUrl + ' (raw)' });
       }
-    } catch (rawErr) {
-      console.warn(`[WebScraper] Raw HTTP fetch failed: ${rawErr.message}`);
+
+      // Backup: regex email extraction
+      const rawEmails = extractEmailsFromHtmlWithGeneric(rawHtml);
+      for (const email of rawEmails.generic) {
+        if (!allGenericEmails.includes(email)) {
+          allGenericEmails.push(email);
+          rawPageLog.genericEmails.push(email);
+        }
+      }
+
+      rawContacts = verifyAndAddMissedContacts(rawContacts, rawHtml);
+      rawPageLog.contactsFound = rawContacts.length;
+      rawPageLog.status = rawContacts.length > 0 ? 'success' : 'no_contacts';
+
+      if (rawContacts.length > 0) {
+        console.log(`[WebScraper] Raw fetch found ${rawContacts.length} contacts!`);
+      }
+
+      allContactsRaw.push(...rawContacts);
+      log.pagesScraped.push(rawPageLog);
     }
 
     // Step 3.6: Also try raw HTTP fetch of contact page URLs (FREE, no Firecrawl credits)
@@ -882,19 +980,46 @@ async function scrapeTeamPages(domain, options = {}) {
     for (const contactPageUrl of contactPageUrls) {
       try {
         console.log(`[WebScraper] Trying raw HTTP fetch of contact page: ${contactPageUrl}`);
-        const contactRes = await fetch(contactPageUrl, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeadScraper/1.0)' },
-          redirect: 'follow',
-          signal: AbortSignal.timeout(15000)
-        });
-        const contactHtml = await contactRes.text();
+        // Try the URL as-is first, then with opposite protocol
+        let contactHtml = null;
+        let fetchUrl = contactPageUrl;
 
-        if (contactHtml.length > 500) {
-          const contactPageLog = { url: contactPageUrl, category: 'CONTACT (raw fetch)', status: 'pending', contactsFound: 0, genericEmails: [] };
+        try {
+          const contactRes = await fetch(contactPageUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeadScraper/1.0)' },
+            redirect: 'follow',
+            signal: AbortSignal.timeout(15000)
+          });
+          contactHtml = await contactRes.text();
+          if (contactHtml.length <= 500) contactHtml = null;
+        } catch {
+          // Try opposite protocol
+          const altUrl = contactPageUrl.startsWith('https://')
+            ? contactPageUrl.replace('https://', 'http://')
+            : contactPageUrl.replace('http://', 'https://');
+          try {
+            const altRes = await fetch(altUrl, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeadScraper/1.0)' },
+              redirect: 'follow',
+              signal: AbortSignal.timeout(15000)
+            });
+            contactHtml = await altRes.text();
+            if (contactHtml.length > 500) {
+              fetchUrl = altUrl;
+            } else {
+              contactHtml = null;
+            }
+          } catch (altErr) {
+            console.warn(`[WebScraper] Both protocols failed for contact page: ${contactPageUrl}`);
+          }
+        }
+
+        if (contactHtml) {
+          const contactPageLog = { url: fetchUrl, category: 'CONTACT (raw fetch)', status: 'pending', contactsFound: 0, genericEmails: [] };
 
           let contactContacts = await extractContactsWithClaude(contactHtml, { keepGeneric: true });
           for (const c of contactContacts) {
-            log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: contactPageUrl + ' (raw)' });
+            log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: fetchUrl + ' (raw)' });
           }
 
           const contactEmails = extractEmailsFromHtmlWithGeneric(contactHtml);
