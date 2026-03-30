@@ -47,8 +47,11 @@ function sanitizeErrorMessage(error) {
  */
 function extractDomain(website) {
   if (!website) return null;
+  // Trim whitespace before processing
+  const trimmed = String(website).trim();
+  if (!trimmed) return null;
   try {
-    const url = new URL(website.startsWith('http') ? website : `https://${website}`);
+    const url = new URL(trimmed.startsWith('http') ? trimmed : `https://${trimmed}`);
     return url.hostname.replace(/^www\./, '');
   } catch {
     return null;

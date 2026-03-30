@@ -1,6 +1,6 @@
 const Database = require('better-sqlite3');
 const path = require('path');
-const { buildUpdateQuery, validateIds, escapeCSV } = require('./utils');
+const { buildUpdateQuery, validateIds, escapeCSV, extractDomain } = require('./utils');
 
 const dbPath = path.join(__dirname, 'data', 'leads.db');
 const db = new Database(dbPath);
@@ -644,21 +644,6 @@ function setPrimaryContact(companyId, contactId) {
 // ============ Pipeline Stage Functions ============
 
 /**
- * Get companies by pipeline stage
- * @param {string} stage - Pipeline stage (raw, qualified, classified, enriched, ready)
- * @returns {Array} Companies in that stage
- */
-function getCompaniesByStage(stage) {
-  return db.prepare(`
-    SELECT c.*,
-      (SELECT email FROM contacts WHERE company_id = c.id AND is_primary = 1 LIMIT 1) as primary_email
-    FROM companies c
-    WHERE c.pipeline_stage = ?
-    ORDER BY c.name ASC
-  `).all(stage);
-}
-
-/**
  * Get pipeline statistics (count of companies per stage)
  * @returns {Object} Counts by stage
  */
@@ -798,25 +783,6 @@ function getCompaniesForClassification() {
       AND (segment IS NULL OR segment = '')
     ORDER BY created_at DESC
   `).all();
-}
-
-/**
- * Extract domain from URL
- * @param {string} url - Website URL
- * @returns {string} Domain without protocol/www
- */
-function extractDomain(url) {
-  if (!url) return null;
-  try {
-    let domain = url.toLowerCase()
-      .replace(/^https?:\/\//, '')
-      .replace(/^www\./, '')
-      .split('/')[0]
-      .split('?')[0];
-    return domain;
-  } catch (e) {
-    return null;
-  }
 }
 
 /**

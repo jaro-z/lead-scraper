@@ -4,27 +4,9 @@
  * - Export new leads to Notion
  */
 
-const NOTION_API_VERSION = '2022-06-28';
+const { extractDomain } = require('./utils');
 
-/**
- * Extract domain from URL
- * @param {string} url - Full URL or domain
- * @returns {string} - Clean domain (e.g., "increative.cz")
- */
-function extractDomain(url) {
-  if (!url) return null;
-  try {
-    let domain = url
-      .replace(/^https?:\/\//, '')
-      .replace(/^www\./, '')
-      .split('/')[0]
-      .toLowerCase()
-      .trim();
-    return domain || null;
-  } catch {
-    return null;
-  }
-}
+const NOTION_API_VERSION = '2022-06-28';
 
 /**
  * Fuzzy match score for business names (0-1)
