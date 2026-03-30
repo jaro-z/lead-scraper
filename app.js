@@ -1393,12 +1393,22 @@ async function showDetails(id) {
         </select>
       </div>
     </div>
-    ${company.segment ? `
     <div class="field">
       <div class="field-label">Segment</div>
-      <div class="field-value">${formatSegmentBadge(company.segment, company.enrichment_source)}</div>
+      <div class="field-value">
+        <select class="detail-segment-select" id="detail-segment-select" data-company-id="${company.id}">
+          <option value="">-- Select --</option>
+          <option value="Performance Marketing" ${company.segment === 'Performance Marketing' ? 'selected' : ''}>Performance Marketing</option>
+          <option value="Brand Marketing" ${company.segment === 'Brand Marketing' ? 'selected' : ''}>Brand Marketing</option>
+          <option value="Web Development" ${company.segment === 'Web Development' ? 'selected' : ''}>Web Development</option>
+          <option value="Creative Agency" ${company.segment === 'Creative Agency' ? 'selected' : ''}>Creative Agency</option>
+          <option value="PR & Media" ${company.segment === 'PR & Media' ? 'selected' : ''}>PR & Media</option>
+          <option value="Full-Service Marketing" ${company.segment === 'Full-Service Marketing' ? 'selected' : ''}>Full-Service Marketing</option>
+          <option value="Consulting" ${company.segment === 'Consulting' ? 'selected' : ''}>Consulting</option>
+          <option value="Other" ${company.segment === 'Other' ? 'selected' : ''}>Other</option>
+        </select>
+      </div>
     </div>
-    ` : ''}
     <div class="field">
       <div class="field-label">Website</div>
       <div class="field-value">${company.website ? `<a href="${escapeHtml(company.website)}" target="_blank">${escapeHtml(company.website)}</a>` : '-'}</div>
@@ -1489,6 +1499,29 @@ async function showDetails(id) {
       }
     } catch (err) {
       console.error('Stage change failed:', err);
+    }
+  });
+
+  // Wire up segment selector
+  document.getElementById('detail-segment-select').addEventListener('change', async (e) => {
+    const newSegment = e.target.value;
+    const companyId = parseInt(e.target.dataset.companyId);
+    if (!newSegment) return; // Ignore "-- Select --" option
+    try {
+      const res = await fetch(`/api/companies/${companyId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ segment: newSegment })
+      });
+      if (res.ok) {
+        const comp = companies.find(c => c.id === companyId);
+        if (comp) comp.segment = newSegment;
+        renderTable();
+        // Refresh segment filter dropdown with any new segments
+        loadSegments();
+      }
+    } catch (err) {
+      console.error('Segment change failed:', err);
     }
   });
 

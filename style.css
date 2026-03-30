@@ -739,6 +739,23 @@ header h1 {
   border-color: #9CA3AF;
 }
 
+/* Detail panel segment select */
+.detail-segment-select {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid #D1D5DB;
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+  cursor: pointer;
+  color: #1F2937;
+  min-width: 180px;
+}
+
+.detail-segment-select:hover {
+  border-color: #9CA3AF;
+}
+
 /* Details toggle (More details) */
 .details-more {
   margin-top: 8px;

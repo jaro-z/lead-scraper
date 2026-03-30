@@ -26,6 +26,7 @@ db.exec(`
     address TEXT,
     category TEXT,
     website TEXT,
+    google_maps_url TEXT,
     rating REAL,
     rating_count INTEGER,
     phone TEXT,
@@ -175,13 +176,13 @@ function upsertCompany(company, searchId) {
     // Update with latest data
     db.prepare(`
       UPDATE companies SET
-        name = ?, address = ?, category = ?, website = ?,
+        name = ?, address = ?, category = ?, website = ?, google_maps_url = ?,
         rating = ?, rating_count = ?, phone = ?, opening_hours = ?,
         price_level = ?, business_status = ?, lat = ?, lng = ?,
         photos = ?, types = ?, raw_data = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
-      company.name, company.address, company.category, company.website,
+      company.name, company.address, company.category, company.website, company.google_maps_url,
       company.rating, company.rating_count, company.phone, company.opening_hours,
       company.price_level, company.business_status, company.lat, company.lng,
       company.photos, company.types, company.raw_data, companyId
@@ -190,14 +191,14 @@ function upsertCompany(company, searchId) {
     // Insert new company
     const stmt = db.prepare(`
       INSERT INTO companies (
-        place_id, name, address, category, website, rating, rating_count,
+        place_id, name, address, category, website, google_maps_url, rating, rating_count,
         phone, opening_hours, price_level, business_status, lat, lng,
         photos, types, raw_data
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       company.place_id, company.name, company.address, company.category,
-      company.website, company.rating, company.rating_count, company.phone,
+      company.website, company.google_maps_url, company.rating, company.rating_count, company.phone,
       company.opening_hours, company.price_level, company.business_status,
       company.lat, company.lng, company.photos, company.types, company.raw_data
     );

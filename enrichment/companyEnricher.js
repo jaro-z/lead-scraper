@@ -79,9 +79,9 @@ async function enrichCompany(domain) {
 
 Extract the following:
 1. IČO (Czech company registration number) - exactly 8 digits, often shown in footer or contact page
-2. Segment - pick EXACTLY ONE from this list (no variations, no additions):
+2. Segment - REQUIRED field, you must always provide this. Pick EXACTLY ONE:
    "Performance Marketing", "Brand Marketing", "Web Development", "Creative Agency", "PR & Media", "Full-Service Marketing", "Consulting", "Other"
-   Use "Other" only if none of the above fit at all.
+   If the website content is unclear or you cannot determine the business type, use "Other".
 3. Industry - broad industry (e.g., "Marketing", "Software", "Finance", "Healthcare")
 4. Description - ONE sentence (max 15 words) describing what this company does
 5. Size - estimate: small (<10), medium (10-50), large (50+)
@@ -121,6 +121,11 @@ ${truncatedHtml}`
     const segmentValue = safeString(claudeData.segment, 100);
     if (segmentValue) {
       result.segment = segmentValue;
+    }
+
+    // Ensure segment is never null - default to 'Other' if Claude didn't provide one
+    if (!result.segment) {
+      result.segment = 'Other';
     }
 
     // Apply industry (safe extraction with max length)
