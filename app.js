@@ -1736,17 +1736,12 @@ function buildEnrichmentLogHtml(log, error) {
 
 function buildHunterLogHtml(log) {
   if (!log?.hunter) {
-    // Hunter full search was never called — check if DM search was performed
     if (log?.decisionMakerSearch) {
       const dmFound = log.decisionMakerSearch.found || 0;
-      const dmIcon = dmFound > 0 ? '✓' : '○';
-      return `<div class="log-section"><div class="log-header">Hunter.io: decision-maker search only</div><div class="log-item">${dmIcon} ${dmFound} decision-maker${dmFound !== 1 ? 's' : ''} found</div></div>`;
+      return `<div class="log-section"><div class="log-header">Hunter.io: decision-maker search only</div><div class="log-item">${dmFound > 0 ? '✓' : '○'} ${dmFound} decision-maker${dmFound !== 1 ? 's' : ''} found</div></div>`;
     }
-    // No Hunter calls at all — web scraping found personal contacts
     const contactsKept = log?.webScrape?.contactsKept?.length || 0;
-    const reason = contactsKept > 0
-      ? `Not needed — web scraping found ${contactsKept} personal contact${contactsKept > 1 ? 's' : ''}`
-      : 'Not needed — web scraping found contacts';
+    const reason = contactsKept > 0 ? `Not needed — web scraping found ${contactsKept} personal contact${contactsKept > 1 ? 's' : ''}` : 'Not needed — web scraping found contacts';
     return `<div class="log-section"><div class="log-header">Hunter.io: skipped</div><div class="log-item log-skipped">└─ ${reason}</div></div>`;
   }
   const h = log.hunter;

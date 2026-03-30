@@ -398,38 +398,22 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
         }
       }
 
-      // Issue 1 fix (enhanced): ALWAYS fall through to full Hunter domain-search when
-      // web scraping found no REAL personal emails (only generic info@ / name-only contacts).
-      //
-      // Previously, if searchDecisionMakers found contacts, we'd return early. Now we ALWAYS
-      // call full domainSearch when web scraping only found generic emails, because:
-      // - Hunter may have personal emails beyond just decision-makers
-      // - Test showed 35% of generic-only companies have personal emails in Hunter
-      //
-      // Only return early if web scraping found actual personal emails (not generic, not DM-search).
+      // Only return early if web scraping found actual personal emails (not generic or pattern-derived)
       const webScrapeFoundPersonalEmail = normalizedContacts.some(c =>
         c.email && !c.isGenericFallback &&
         c.source === 'web_scrape' &&
-        c.emailSource !== 'pattern_derived' &&
-        c.emailSource !== 'first_name_pattern' &&
-        c.emailSource !== 'hunter_domain_search'
+        !['pattern_derived', 'first_name_pattern', 'hunter_domain_search'].includes(c.emailSource)
       );
 
-      if (!webScrapeFoundPersonalEmail) {
-        console.log(`[Waterfall] Web scrape found no personal emails — falling through to full Hunter domain-search for ${cleanDomain}`);
-        // Don't return early — fall through to Step 2 (Hunter domain-search) below
-        // Carry the scraped contacts (names, generic emails, DM results) into the log so we don't lose them.
-        log.webScrape = scrapeResult.log;
-        log.webScrapeContacts = normalizedContacts; // preserve for merging after Hunter
-      } else {
+      if (webScrapeFoundPersonalEmail) {
         log.source = 'web_scrape';
-        return {
-          source: 'web_scrape',
-          contacts: normalizedContacts,
-          companyId,
-          log
-        };
+        return { source: 'web_scrape', contacts: normalizedContacts, companyId, log };
       }
+
+      // No personal emails found — fall through to Hunter domain-search
+      console.log(`[Waterfall] Web scrape found no personal emails — falling through to full Hunter domain-search for ${cleanDomain}`);
+      log.webScrape = scrapeResult.log;
+      log.webScrapeContacts = normalizedContacts;
     }
   } catch (error) {
     console.warn(`[Waterfall] Web scraping failed for ${cleanDomain}:`, error.message);
@@ -447,22 +431,14 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
       if (hunterContacts.length > 0) {
         console.log(`[Waterfall] Found ${hunterContacts.length} contacts via Hunter.io for ${cleanDomain}`);
 
-        // Merge Hunter results with any web scrape contacts that had emails recovered
-        // (e.g., via email-finder in Step 1.5). Deduplicate by email.
         const hunterNormalized = normalizeContacts(hunterContacts, 'hunter');
+        const hunterEmails = new Set(hunterNormalized.map(c => c.email?.toLowerCase()).filter(Boolean));
         const webScrapeContacts = log.webScrapeContacts || [];
 
-        // Get emails from Hunter results for deduplication
-        const hunterEmails = new Set(hunterNormalized.map(c => c.email?.toLowerCase()).filter(Boolean));
-
-        // Keep web scrape contacts that have emails NOT in Hunter results
-        // (these are likely email-finder enriched contacts)
+        // Keep web scrape contacts with emails not in Hunter results
         const uniqueWebScrapeContacts = webScrapeContacts.filter(c =>
           c.email && !c.isGenericFallback && !hunterEmails.has(c.email.toLowerCase())
         );
-
-        // Merge: Hunter contacts first (they have confidence scores), then unique web scrape contacts
-        const mergedContacts = [...hunterNormalized, ...uniqueWebScrapeContacts];
 
         if (uniqueWebScrapeContacts.length > 0) {
           console.log(`[Waterfall] Merged ${uniqueWebScrapeContacts.length} email-finder contacts with Hunter results`);
@@ -471,7 +447,7 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
         log.source = 'hunter';
         return {
           source: 'hunter',
-          contacts: mergedContacts,
+          contacts: [...hunterNormalized, ...uniqueWebScrapeContacts],
           companyId,
           organization: hunterResult.organization,
           log
