@@ -275,6 +275,14 @@ app.get('/api/companies/by-stage/:stage', asyncHandler((req, res) => {
   res.json(db.getCompaniesByStage(req.params.stage, searchId));
 }));
 
+// Export all contacts - must be before /api/companies/:id
+app.get('/api/companies/export', asyncHandler((req, res) => {
+  const csv = db.exportContactsCSV({});
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="all-contacts.csv"');
+  res.send(csv);
+}));
+
 app.get('/api/companies/:id', asyncHandler((req, res) => {
   const company = getCompanyOrFail(req.params.id, res);
   if (company) res.json(company);
@@ -310,22 +318,16 @@ app.post('/api/companies/bulk-delete', asyncHandler((req, res) => {
 
 // ============ Export ============
 
-function sendCSV(res, companies, filename) {
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send(db.exportToCSV(companies));
-}
-
+// Export contacts with company info (one row per contact, or one row per company if no contacts)
 app.get('/api/searches/:id/export', asyncHandler((req, res) => {
-  let companies = db.getCompaniesBySearch(req.params.id);
+  const filters = { searchId: parseInt(req.params.id) };
   if (req.query.ids) {
-    const ids = new Set(req.query.ids.split(',').map(Number));
-    companies = companies.filter(c => ids.has(c.id));
+    filters.companyIds = req.query.ids.split(',').map(Number);
   }
-  sendCSV(res, companies, `leads-search-${req.params.id}.csv`);
-}));
-app.get('/api/companies/export', asyncHandler((req, res) => {
-  sendCSV(res, db.getAllCompanies(), 'all-leads.csv');
+  const csv = db.exportContactsCSV(filters);
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="contacts-search-${req.params.id}.csv"`);
+  res.send(csv);
 }));
 
 app.get('/api/export/yamm', asyncHandler((req, res) => {
@@ -504,17 +506,23 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
       const contact = contacts[i];
       let emailValidation = null;
 
-      if (contact.email) {
+      // Skip MX-only validation for fabricated emails — MX checks domain not mailbox
+      const isFabricated = contact.emailSource === 'pattern_derived' || contact.emailSource === 'first_name_pattern';
+
+      if (contact.email && !isFabricated) {
         try {
           emailValidation = await validateEmail(contact.email);
         } catch {
           emailValidation = { valid: false, reason: 'validation_error' };
         }
+      } else if (contact.email && isFabricated) {
+        emailValidation = { valid: false, reason: 'pattern_generated' };
       }
 
       const templateType = assignTemplate(contact.title || contact.role);
 
       // Update the already-saved contact with validation and template data
+      // Use per-contact source (not top-level contactResult.source) to preserve email provenance
       const dbContacts = db.getContactsByCompany(company.id);
       const dbContact = dbContacts.find(c => c.email === contact.email);
       if (dbContact) {
@@ -522,7 +530,7 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
           email_valid: emailValidation?.valid || false,
           email_validated_at: new Date().toISOString(),
           template_type: templateType,
-          source: contactResult.source || 'unknown',
+          source: contact.source || contact.emailSource || contactResult.source || 'unknown',
           phone: contact.phone || null
         });
       }
@@ -531,7 +539,7 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
         ...contact,
         email_valid: emailValidation?.valid || false,
         template_type: templateType,
-        source: contactResult.source
+        source: contact.source || contact.emailSource || contactResult.source
       });
     }
   });
@@ -579,7 +587,9 @@ function formatContactsForDB(contacts) {
     fullName: c.name,
     title: c.title,
     isPrimary: idx === 0,
-    confidence: c.confidence || 50
+    confidence: c.confidence || 50,
+    source: c.source || c.emailSource || 'unknown',
+    emailSource: c.emailSource || c.source || 'unknown'
   }));
 }
 
@@ -734,6 +744,17 @@ app.post('/api/contacts/validate-batch', batchValidateLimiter, asyncHandler(asyn
 
   for (const contact of toProcess) {
     try {
+      // Skip MX validation for fabricated emails — MX only checks domain, not mailbox
+      if (contact.email_source === 'pattern_derived' || contact.email_source === 'first_name_pattern') {
+        db.updateContactValidation(contact.id, {
+          email_valid: false,
+          email_validated_at: new Date().toISOString()
+        });
+        results.invalid++;
+        results.processed++;
+        continue;
+      }
+
       const validation = await validateEmail(contact.email);
 
       db.updateContactValidation(contact.id, {

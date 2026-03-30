@@ -40,8 +40,36 @@ const GENERIC_EMAIL_PREFIXES = [
   'helpdesk@', 'service@', 'billing@', 'accounts@', 'general@'
 ];
 
+// Blocklisted email domains (browser artifacts, tracking, Wix internals, directories)
+const BLOCKED_EMAIL_DOMAINS = [
+  'mhtml.blink',           // Browser MHTML artifacts (e.g., frame-abc123@mhtml.blink)
+  'wixpress.com',          // Wix internal / Sentry tracking
+  'sentry.io',             // Sentry error tracking
+  'sentry-next.wixpress.com', // Wix Sentry variant
+  'lista.cz',              // Czech job board
+  'firma.seznam.cz'        // Czech business directory
+];
+
+// Placeholder email addresses (Czech: priklad = "example")
+const BLOCKED_PLACEHOLDER_EMAILS = [
+  'priklad@email.cz'
+];
+
+// Common Czech/Slovak personal email providers (not external domains)
+const CZECH_PERSONAL_PROVIDERS = [
+  'gmail.com', 'yahoo.com', 'seznam.cz', 'email.cz', 'volny.cz',
+  'centrum.cz', 'post.cz', 'atlas.cz', 'tiscali.cz', 'iol.cz',
+  'quick.cz', 'worldonline.cz'
+];
+
+// Common business email providers (not external domains)
+const BUSINESS_EMAIL_PROVIDERS = [
+  'outlook.com', 'hotmail.com', 'live.com'
+];
+
 /**
  * Sanitize email address - remove URL encoding, HTML artifacts, validate format
+ * Also filters browser artifacts, tracking domains, and hex-hash local parts.
  * @param {string} email - Raw email string
  * @param {boolean} skipCompanyPattern - If true, don't filter company-pattern emails (for person-associated emails)
  * @returns {string|null} - Cleaned email or null if invalid
@@ -72,11 +100,33 @@ function sanitizeEmail(email, skipCompanyPattern = false) {
   // Validate basic email format
   if (!cleaned.includes('@') || !cleaned.includes('.')) return null;
 
+  const [localPart, emailDomain] = cleaned.toLowerCase().split('@');
+  if (!emailDomain) return null;
+
+  // Filter blocked placeholder emails (exact match)
+  if (BLOCKED_PLACEHOLDER_EMAILS.includes(cleaned.toLowerCase())) {
+    console.log(`[WebScraper] Filtered placeholder email: ${cleaned}`);
+    return null;
+  }
+
+  // Filter blocked domains (domain ends with any of the blocked patterns)
+  for (const blockedDomain of BLOCKED_EMAIL_DOMAINS) {
+    if (emailDomain === blockedDomain || emailDomain.endsWith('.' + blockedDomain)) {
+      console.log(`[WebScraper] Filtered blocked domain email: ${cleaned} (matches: ${blockedDomain})`);
+      return null;
+    }
+  }
+
+  // Filter hex-hash local parts (32+ hex chars = tracking hash, not a real email)
+  if (/^[0-9a-f]{32,}$/.test(localPart)) {
+    console.log(`[WebScraper] Filtered hex-hash email: ${cleaned}`);
+    return null;
+  }
+
   // Check for company-name@ pattern (e.g., woxo@woxo.cz, bpa@bpa.cz)
   // Skip this filter if the email is explicitly associated with a person
   if (!skipCompanyPattern) {
-    const [localPart, domain] = cleaned.toLowerCase().split('@');
-    const domainName = domain.split('.')[0]; // Get domain without TLD
+    const domainName = emailDomain.split('.')[0]; // Get domain without TLD
     if (localPart === domainName) {
       // This is a company@ email pattern - treat as generic
       return null;
@@ -84,6 +134,48 @@ function sanitizeEmail(email, skipCompanyPattern = false) {
   }
 
   return cleaned.toLowerCase();
+}
+
+/**
+ * Check if an email belongs to an external domain unrelated to the scraped company.
+ * Returns true if the email domain is NOT the company domain, NOT a subdomain of it,
+ * and NOT a known personal/business email provider.
+ *
+ * @param {string} email - Email address to check
+ * @param {string} companyDomain - The company's domain (e.g., 'company.cz')
+ * @returns {boolean} True if external domain
+ */
+function isExternalDomainEmail(email, companyDomain) {
+  if (!email || !companyDomain) return false;
+
+  const emailDomain = email.toLowerCase().split('@')[1];
+  if (!emailDomain) return false;
+
+  const cleanCompanyDomain = companyDomain.toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '');
+
+  // Same domain or subdomain of it → not external
+  if (emailDomain === cleanCompanyDomain || emailDomain.endsWith('.' + cleanCompanyDomain)) {
+    return false;
+  }
+
+  // Parent domain of companyDomain → not external
+  // e.g., companyDomain = 'cz.prefa.com', email = 'jan@prefa.com'
+  // 'cz.prefa.com'.endsWith('.prefa.com') → true → prefa.com is the parent, not external
+  if (cleanCompanyDomain.endsWith('.' + emailDomain)) {
+    return false;
+  }
+
+  // Known personal email providers → not external
+  if (CZECH_PERSONAL_PROVIDERS.includes(emailDomain)) return false;
+
+  // Known business email providers → not external
+  if (BUSINESS_EMAIL_PROVIDERS.includes(emailDomain)) return false;
+
+  // Everything else is an external domain
+  return true;
 }
 
 /**
@@ -337,10 +429,11 @@ function cleanHtml(html) {
  * @param {string} html - Page HTML content
  * @param {Object} options - Extraction options
  * @param {boolean} options.keepGeneric - If true, keep generic emails (info@, etc.) in results
+ * @param {string} options.companyDomain - Company domain for external domain detection
  * @returns {Promise<Array<{name: string, role: string, email: string, phone: string}>>}
  */
 async function extractContactsWithClaude(html, options = {}) {
-  const { keepGeneric = false } = options;
+  const { keepGeneric = false, companyDomain = null } = options;
 
   // Clean and truncate HTML to fit in API limits
   const cleanedHtml = cleanHtml(html);
@@ -443,24 +536,52 @@ ${truncatedHtml}`
 
     const contacts = JSON.parse(jsonMatch[0]);
 
+    // Czech academic/professional title prefixes that sometimes end up as firstName
+    const CZECH_TITLE_PREFIXES = [
+      'ing', 'mgr', 'dr', 'rndr', 'judr', 'phdr', 'mudr', 'bc', 'dis',
+      'ing.', 'mgr.', 'dr.', 'rndr.', 'judr.', 'phdr.', 'mudr.', 'bc.', 'dis.'
+    ];
+
     return contacts
       .filter(contact => contact.name && typeof contact.name === 'string' && contact.name.length >= 2)
       .map(contact => {
         const isAssociatedWithPerson = contact.emailAssociatedWithPerson === true;
+
+        // Sanitize the email first
+        let sanitizedEmail = isAssociatedWithPerson
+          ? sanitizeEmail(contact.email, true) // Skip company-pattern filter for associated emails
+          : (keepGeneric ? sanitizeEmail(contact.email) : filterGenericEmail(contact.email));
+
+        // Change 2: Flag external domain emails with low confidence instead of discarding
+        let emailFromExternalDomain = false;
+        if (sanitizedEmail && companyDomain && isExternalDomainEmail(sanitizedEmail, companyDomain)) {
+          emailFromExternalDomain = true;
+          console.log(`[WebScraper] External domain email flagged: ${sanitizedEmail} (company: ${companyDomain})`);
+        }
+
+        // Change 3: Filter Czech title prefixes from firstName field
+        let firstName = sanitizeContactField(contact.firstName) || null;
+        if (firstName) {
+          const firstNameLower = firstName.toLowerCase().replace(/\.$/, '').trim();
+          if (CZECH_TITLE_PREFIXES.includes(firstNameLower)) {
+            console.log(`[WebScraper] Filtered Czech title prefix from firstName: "${firstName}" for contact "${contact.name}"`);
+            firstName = null;
+          }
+        }
+
         return {
           name: sanitizeContactField(contact.name),
-          firstName: sanitizeContactField(contact.firstName) || null,
+          firstName,
           lastName: sanitizeContactField(contact.lastName) || null,
           role: sanitizeContactField(contact.role),
-          // Keep email if associated with person (even generic), otherwise filter generics
-          email: isAssociatedWithPerson
-            ? sanitizeEmail(contact.email, true) // Skip company-pattern filter for associated emails
-            : (keepGeneric ? sanitizeEmail(contact.email) : filterGenericEmail(contact.email)),
+          email: sanitizedEmail,
           phone: sanitizeContactField(contact.phone),
           // Claude determines if this person is a decision-maker (can authorize purchases)
           isDecisionMaker: contact.isDecisionMaker === true,
           // Track if this generic email is personally associated with this contact
-          emailAssociatedWithPerson: isAssociatedWithPerson
+          emailAssociatedWithPerson: isAssociatedWithPerson,
+          // Change 2: Flag external domain emails
+          ...(emailFromExternalDomain && { emailFromExternalDomain: true, confidence: 5 })
         };
       })
       .filter(contact => contact.name);
@@ -827,11 +948,13 @@ async function scrapeTeamPages(domain, options = {}) {
     rankedPages = [{ url: homepageUrl, category: 'HOMEPAGE' }];
     log.pagesRanked = [{ url: homepageUrl, category: 'HOMEPAGE (fallback)' }];
     log.homepageFallback = true;
-  } else if (allUrls.length <= 3 && !homepageInRanked) {
-    // Small sites (3 or fewer pages) almost always have contact info on the homepage
+  } else if (!homepageInRanked) {
+    // Change 5: Always include homepage as a quick first scan — many Czech B2B sites
+    // show founders/contact info directly on the homepage regardless of site size.
+    // Insert at the FRONT so scrapeLimit doesn't cut it off when AI already ranked maxAttempts pages.
     const homepageUrl = findHomepageUrl();
-    rankedPages.push({ url: homepageUrl, category: 'HOMEPAGE' });
-    console.log(`[WebScraper] Small site (${allUrls.length} URLs), adding homepage: ${homepageUrl}`);
+    rankedPages.unshift({ url: homepageUrl, category: 'HOMEPAGE' });
+    console.log(`[WebScraper] Adding homepage to ranked pages for quick first scan: ${homepageUrl}`);
   }
 
   // Step 3: Scrape ALL ranked pages and collect contacts
@@ -852,7 +975,7 @@ async function scrapeTeamPages(domain, options = {}) {
       pageLog.status = 'scraped';
 
       // Extract contacts (includes generic emails at this stage)
-      let contacts = await extractContactsWithClaude(html, { keepGeneric: true });
+      let contacts = await extractContactsWithClaude(html, { keepGeneric: true, companyDomain: domain });
 
       // Track raw contacts before filtering
       for (const c of contacts) {
@@ -860,7 +983,7 @@ async function scrapeTeamPages(domain, options = {}) {
       }
 
       // Also extract emails from raw HTML (backup)
-      const htmlEmails = extractEmailsFromHtmlWithGeneric(html);
+      const htmlEmails = extractEmailsFromHtmlWithGeneric(html, domain);
       for (const email of htmlEmails.generic) {
         if (!allGenericEmails.includes(email)) {
           allGenericEmails.push(email);
@@ -901,11 +1024,11 @@ async function scrapeTeamPages(domain, options = {}) {
       try {
         const html = await fetchPage(homepageUrl);
         pageLog.status = 'scraped';
-        let contacts = await extractContactsWithClaude(html, { keepGeneric: true });
+        let contacts = await extractContactsWithClaude(html, { keepGeneric: true, companyDomain: domain });
         for (const c of contacts) {
           log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: homepageUrl });
         }
-        const htmlEmails = extractEmailsFromHtmlWithGeneric(html);
+        const htmlEmails = extractEmailsFromHtmlWithGeneric(html, domain);
         for (const email of htmlEmails.generic) {
           if (!allGenericEmails.includes(email)) {
             allGenericEmails.push(email);
@@ -939,13 +1062,13 @@ async function scrapeTeamPages(domain, options = {}) {
       const rawPageLog = { url: homepageUrl, category: 'HOMEPAGE (raw fetch)', status: 'pending', contactsFound: 0, genericEmails: [] };
 
       // Extract contacts from raw SSR HTML
-      let rawContacts = await extractContactsWithClaude(rawHtml, { keepGeneric: true });
+      let rawContacts = await extractContactsWithClaude(rawHtml, { keepGeneric: true, companyDomain: domain });
       for (const c of rawContacts) {
         log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: homepageUrl + ' (raw)' });
       }
 
       // Backup: regex email extraction
-      const rawEmails = extractEmailsFromHtmlWithGeneric(rawHtml);
+      const rawEmails = extractEmailsFromHtmlWithGeneric(rawHtml, domain);
       for (const email of rawEmails.generic) {
         if (!allGenericEmails.includes(email)) {
           allGenericEmails.push(email);
@@ -1017,12 +1140,12 @@ async function scrapeTeamPages(domain, options = {}) {
         if (contactHtml) {
           const contactPageLog = { url: fetchUrl, category: 'CONTACT (raw fetch)', status: 'pending', contactsFound: 0, genericEmails: [] };
 
-          let contactContacts = await extractContactsWithClaude(contactHtml, { keepGeneric: true });
+          let contactContacts = await extractContactsWithClaude(contactHtml, { keepGeneric: true, companyDomain: domain });
           for (const c of contactContacts) {
             log.contactsRaw.push({ name: c.name, role: c.role, email: c.email, phone: c.phone, page: fetchUrl + ' (raw)' });
           }
 
-          const contactEmails = extractEmailsFromHtmlWithGeneric(contactHtml);
+          const contactEmails = extractEmailsFromHtmlWithGeneric(contactHtml, domain);
           for (const email of contactEmails.generic) {
             if (!allGenericEmails.includes(email)) {
               allGenericEmails.push(email);
@@ -1057,8 +1180,11 @@ async function scrapeTeamPages(domain, options = {}) {
   }
 
   // Step 5: Separate personal vs generic emails
-  // Personal emails (firstname@, etc.)
-  const personalContacts = mergedContacts.filter(c => c.email && !isGenericEmail(c.email));
+  // Personal emails (firstname@, etc.) — exclude external-domain emails (vendor/lawyer addresses)
+  // External-domain contacts are flagged with emailFromExternalDomain:true and confidence:5.
+  // They don't count as "personal" contacts for this company — keeping them in personalContacts
+  // caused tmp@aceit.cz and ruzicka@krlegal.cz to appear as [real_scraped] high-confidence emails.
+  const personalContacts = mergedContacts.filter(c => c.email && !isGenericEmail(c.email) && !c.emailFromExternalDomain);
   // Generic emails associated with a specific person (e.g., "Lucie Novak" with info@company.cz)
   const personAssociatedGeneric = mergedContacts.filter(
     c => c.email && isGenericEmail(c.email) && c.emailAssociatedWithPerson && c.name
@@ -1174,11 +1300,13 @@ async function scrapeTeamPages(domain, options = {}) {
 }
 
 /**
- * Extract emails from HTML, separating personal from generic
+ * Extract emails from HTML, separating personal from generic.
+ * Also flags emails from external domains (Change 2).
  * @param {string} html - Raw HTML content
- * @returns {{personal: string[], generic: string[]}}
+ * @param {string} [companyDomain] - Company domain for external domain detection
+ * @returns {{personal: string[], generic: string[], externalDomain: string[]}}
  */
-function extractEmailsFromHtmlWithGeneric(html) {
+function extractEmailsFromHtmlWithGeneric(html, companyDomain = null) {
   let decodedHtml = html;
   try {
     decodedHtml = decodeURIComponent(html.replace(/\+/g, ' '));
@@ -1191,6 +1319,7 @@ function extractEmailsFromHtmlWithGeneric(html) {
 
   const personal = [];
   const generic = [];
+  const externalDomain = [];
 
   for (const rawEmail of [...new Set(matches)]) {
     const sanitized = sanitizeEmail(rawEmail);
@@ -1200,6 +1329,15 @@ function extractEmailsFromHtmlWithGeneric(html) {
     if (/\.(png|jpg|jpeg|gif|svg|webp|ico|css|js)$/i.test(sanitized)) continue;
     if (/example\.|test@|placeholder|jmenujise@/i.test(sanitized)) continue;
 
+    // Change 2: Flag external domain emails
+    if (companyDomain && isExternalDomainEmail(sanitized, companyDomain)) {
+      if (!externalDomain.includes(sanitized)) {
+        externalDomain.push(sanitized);
+        console.log(`[WebScraper] External domain email in raw HTML: ${sanitized} (company: ${companyDomain})`);
+      }
+      continue; // Don't add to personal/generic — handled separately
+    }
+
     if (isGenericEmail(sanitized)) {
       if (!generic.includes(sanitized)) generic.push(sanitized);
     } else {
@@ -1207,7 +1345,7 @@ function extractEmailsFromHtmlWithGeneric(html) {
     }
   }
 
-  return { personal, generic };
+  return { personal, generic, externalDomain };
 }
 
 module.exports = {
@@ -1240,7 +1378,11 @@ module.exports = {
   filterGenericEmail,
   sanitizeEmail,
   isCompanyPatternEmail,
+  isExternalDomainEmail,
   GENERIC_EMAIL_PREFIXES,
+  BLOCKED_EMAIL_DOMAINS,
+  CZECH_PERSONAL_PROVIDERS,
+  BUSINESS_EMAIL_PROVIDERS,
   PAGE_CATEGORIES,
   CONTACT_URL_SUFFIXES
 };

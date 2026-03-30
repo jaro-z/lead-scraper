@@ -124,6 +124,7 @@ addColumnIfMissing('contacts', 'email_valid', 'INTEGER');
 addColumnIfMissing('contacts', 'email_validated_at', 'TEXT');
 addColumnIfMissing('contacts', 'template_type', 'TEXT');
 addColumnIfMissing('contacts', 'source', 'TEXT');
+addColumnIfMissing('contacts', 'email_source', 'TEXT');
 
 // ============ Searches ============
 
@@ -308,6 +309,7 @@ function canMakeApiCall(limit) {
 
 // ============ Export ============
 
+// Legacy company-only export (kept for backwards compatibility)
 function exportToCSV(companies) {
   const headers = ['Name', 'Address', 'Category', 'Website', 'Rating', 'Reviews', 'Phone', 'Added'];
   const rows = companies.map(c => [
@@ -316,6 +318,106 @@ function exportToCSV(companies) {
   ].map(escapeCSV));
 
   return [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
+}
+
+/**
+ * Export contacts with company info. Each row = one contact.
+ * If a company has no contacts, exports one row with company info only.
+ * @param {Object} filters - { searchId, companyIds }
+ */
+function exportContactsCSV(filters = {}) {
+  let query = `
+    SELECT
+      c.id as company_id,
+      c.name as company_name,
+      c.address,
+      c.category,
+      c.website,
+      c.phone as company_phone,
+      c.rating,
+      c.rating_count,
+      c.segment,
+      c.industry,
+      c.company_size,
+      ct.id as contact_id,
+      ct.first_name,
+      ct.last_name,
+      ct.full_name,
+      ct.email,
+      ct.title,
+      ct.phone as contact_phone,
+      ct.email_valid,
+      ct.is_primary
+    FROM companies c
+    LEFT JOIN contacts ct ON ct.company_id = c.id
+  `;
+  const params = [];
+  const conditions = [];
+
+  // Filter by search ID
+  if (filters.searchId) {
+    conditions.push(`c.id IN (SELECT company_id FROM search_companies WHERE search_id = ?)`);
+    params.push(filters.searchId);
+  }
+
+  // Filter by specific company IDs
+  if (filters.companyIds && filters.companyIds.length > 0) {
+    conditions.push(`c.id IN (${filters.companyIds.map(() => '?').join(',')})`);
+    params.push(...filters.companyIds);
+  }
+
+  if (conditions.length > 0) {
+    query += ' WHERE ' + conditions.join(' AND ');
+  }
+
+  // Order by company name, then primary contact first, then by contact name
+  query += ' ORDER BY c.name ASC, ct.is_primary DESC, ct.full_name ASC';
+
+  const rows = db.prepare(query).all(...params);
+
+  const headers = [
+    'Company Name',
+    'First Name',
+    'Last Name',
+    'Full Name',
+    'Email',
+    'Title',
+    'Contact Phone',
+    'Email Valid',
+    'Primary Contact',
+    'Company Phone',
+    'Address',
+    'Category',
+    'Website',
+    'Segment',
+    'Industry',
+    'Company Size',
+    'Rating',
+    'Reviews'
+  ];
+
+  const csvRows = rows.map(r => [
+    r.company_name || '',
+    r.first_name || '',
+    r.last_name || '',
+    r.full_name || '',
+    r.email || '',
+    r.title || '',
+    r.contact_phone || '',
+    r.email_valid === 1 ? 'Yes' : (r.email_valid === 0 ? 'No' : ''),
+    r.is_primary === 1 ? 'Yes' : (r.contact_id ? 'No' : ''),
+    r.company_phone || '',
+    r.address || '',
+    r.category || '',
+    r.website || '',
+    r.segment || '',
+    r.industry || '',
+    r.company_size || '',
+    r.rating || '',
+    r.rating_count || ''
+  ].map(escapeCSV));
+
+  return [headers.join(','), ...csvRows.map(row => row.join(','))].join('\n');
 }
 
 function exportToYAMM(filters = {}) {
@@ -379,12 +481,12 @@ function saveContacts(companyId, contacts) {
   db.prepare(`DELETE FROM contacts WHERE company_id = ?`).run(companyId);
 
   const stmt = db.prepare(`
-    INSERT INTO contacts (company_id, email, first_name, last_name, full_name, title, is_primary, confidence)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO contacts (company_id, email, first_name, last_name, full_name, title, is_primary, confidence, source, email_source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   for (const c of contacts) {
-    stmt.run(companyId, c.email, c.firstName, c.lastName, c.fullName, c.title, c.isPrimary ? 1 : 0, c.confidence);
+    stmt.run(companyId, c.email, c.firstName, c.lastName, c.fullName, c.title, c.isPrimary ? 1 : 0, c.confidence, c.source || null, c.emailSource || null);
   }
 
   // Update company
@@ -895,6 +997,7 @@ module.exports = {
   incrementApiUsage,
   canMakeApiCall,
   exportToCSV,
+  exportContactsCSV,
   exportToYAMM,
   getUncheckedEmailCount,
   saveContacts,

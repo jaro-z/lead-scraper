@@ -284,20 +284,23 @@ async function generateEmailFromFirstName(firstName, domain, apiKey) {
     // Only use the pattern if it doesn't still contain {last} placeholder (those need a last name)
     if (!firstOnlyEmail.includes('{last}') && !firstOnlyEmail.includes('{l}')) {
       candidates.push(`${firstOnlyEmail}@${domain}`);
-    } else {
-      // Pattern requires last name - still try {first}@domain as it's very common in CZ
-      candidates.push(`${first}@${domain}`);
     }
+    // If pattern requires a last name but we only have first name, do NOT generate a fallback.
+    // The domain uses a last-name-based pattern (e.g. dolezal@jtm-partners.cz) so guessing
+    // first-name emails (tomas@jtm-partners.cz) would be wrong and pollute the output.
   }
 
-  // Always include common first-name-only patterns (very common in Czech companies)
-  const firstNamePatterns = [
-    `${first}@${domain}`,                    // standa@agency.cz (most common in CZ)
-  ];
+  // Add {first}@domain as a common Czech fallback — BUT only if we don't have a Hunter pattern
+  // that indicates the domain uses last-name-based emails. If Hunter tells us the pattern is
+  // {last}@domain, adding first@domain would be a known-wrong guess (JTM Partners fabrication fix).
+  const hunterPatternRequiresLastName = hunterPattern && (
+    hunterPattern.includes('{last}') || hunterPattern.includes('{l}')
+  );
 
-  for (const pattern of firstNamePatterns) {
-    if (!candidates.includes(pattern)) {
-      candidates.push(pattern);
+  if (!hunterPatternRequiresLastName) {
+    const firstNameFallback = `${first}@${domain}`;
+    if (!candidates.includes(firstNameFallback)) {
+      candidates.push(firstNameFallback);
     }
   }
 
@@ -308,7 +311,7 @@ async function generateEmailFromFirstName(firstName, domain, apiKey) {
     email: bestGuess,
     candidates,
     pattern: hunterPattern,
-    confidence: hunterPattern ? 40 : 20, // Lower confidence since we don't have last name
+    confidence: hunterPattern ? 15 : 10, // Low confidence — these are unverified guesses
     source: 'first_name_pattern'
   };
 }
