@@ -337,6 +337,7 @@ function exportContactsCSV(filters = {}) {
       c.phone as company_phone,
       c.rating,
       c.rating_count,
+      c.google_maps_url,
       c.segment,
       c.industry,
       c.company_size,
@@ -394,7 +395,8 @@ function exportContactsCSV(filters = {}) {
     'Industry',
     'Company Size',
     'Rating',
-    'Reviews'
+    'Reviews',
+    'Google Maps URL'
   ];
 
   const csvRows = rows.map(r => [
@@ -415,7 +417,8 @@ function exportContactsCSV(filters = {}) {
     r.industry || '',
     r.company_size || '',
     r.rating || '',
-    r.rating_count || ''
+    r.rating_count || '',
+    r.google_maps_url || ''
   ].map(escapeCSV));
 
   return [headers.join(','), ...csvRows.map(row => row.join(','))].join('\n');
