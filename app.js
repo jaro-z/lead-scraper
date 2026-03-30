@@ -584,10 +584,9 @@ function renderCompanies() {
       <td>${escapeHtml(c.name || '-')}</td>
       <td>${escapeHtml(extractCity(c.address))}</td>
       <td>${c.website ? `<a href="${escapeHtml(c.website)}" target="_blank">${escapeHtml(formatWebsiteUrl(c.website))}</a>` : '<span style="color:#9CA3AF">-</span>'}</td>
-      <td class="rating-col">${formatRating(c.rating, c.rating_count)}</td>
+      <td class="rating-col">${formatRating(c.rating, c.rating_count, c.google_maps_url)}</td>
       <td class="contact-col">${formatContactCell(c)}</td>
       <td>${formatSegmentBadge(c.segment, c.enrichment_source)}</td>
-      <td class="status-cell"><span class="status-${status.state}">${status.text}</span></td>
       <td>
         <div class="action-icons">
           <button class="icon-btn view-btn" title="View details">
@@ -1737,12 +1736,17 @@ function buildEnrichmentLogHtml(log, error) {
 
 function buildHunterLogHtml(log) {
   if (!log?.hunter) {
-    // Hunter was never called — web scraping found contacts so waterfall returned early
-    const webResult = log?.webScrape?.result;
+    // Hunter full search was never called — check if DM search was performed
+    if (log?.decisionMakerSearch) {
+      const dmFound = log.decisionMakerSearch.found || 0;
+      const dmIcon = dmFound > 0 ? '✓' : '○';
+      return `<div class="log-section"><div class="log-header">Hunter.io: decision-maker search only</div><div class="log-item">${dmIcon} ${dmFound} decision-maker${dmFound !== 1 ? 's' : ''} found</div></div>`;
+    }
+    // No Hunter calls at all — web scraping found personal contacts
     const contactsKept = log?.webScrape?.contactsKept?.length || 0;
-    let reason = 'Not needed — web scraping found contacts';
-    if (webResult === 'generic_only') reason = 'Not needed — only generic emails found';
-    else if (contactsKept > 0) reason = `Not needed — web scraping found ${contactsKept} contact${contactsKept > 1 ? 's' : ''}`;
+    const reason = contactsKept > 0
+      ? `Not needed — web scraping found ${contactsKept} personal contact${contactsKept > 1 ? 's' : ''}`
+      : 'Not needed — web scraping found contacts';
     return `<div class="log-section"><div class="log-header">Hunter.io: skipped</div><div class="log-item log-skipped">└─ ${reason}</div></div>`;
   }
   const h = log.hunter;
@@ -1855,12 +1859,18 @@ function formatSegmentBadge(segment, enrichmentSource) {
   return `<span class="segment-badge" style="background:${colors.bg};color:${colors.text}">${escapeHtml(segment)}</span>`;
 }
 
-function formatRating(rating, count) {
+function formatRating(rating, count, googleMapsUrl) {
   // null/undefined = no Google data
   if (rating == null) return '<span style="color:#9CA3AF">-</span>';
   // Format: "4.2 (3)" or "4.2 (1.2k)" for large counts
   const displayCount = count >= 1000 ? (count / 1000).toFixed(1) + 'k' : count || 0;
-  return `${rating.toFixed(1)} (${displayCount})`;
+  const ratingText = `${rating.toFixed(1)} (${displayCount})`;
+
+  // Add Google Maps link icon if URL exists
+  if (googleMapsUrl) {
+    return `${ratingText} <a href="${escapeHtml(googleMapsUrl)}" target="_blank" title="View on Google Maps" class="maps-link"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg></a>`;
+  }
+  return ratingText;
 }
 
 function getContactTier(company) {
