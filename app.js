@@ -571,7 +571,7 @@ function renderCompanies() {
   const sorted = sortCompanies(filteredCompanies);
 
   if (!sorted.length) {
-    resultsBody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;">No results found</td></tr>';
+    resultsBody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;">No results found</td></tr>';
     document.getElementById('results-count').textContent = '';
     return;
   }
@@ -584,6 +584,7 @@ function renderCompanies() {
       <td>${escapeHtml(c.name || '-')}</td>
       <td>${escapeHtml(extractCity(c.address))}</td>
       <td>${c.website ? `<a href="${escapeHtml(c.website)}" target="_blank">${escapeHtml(formatWebsiteUrl(c.website))}</a>` : '<span style="color:#9CA3AF">-</span>'}</td>
+      <td class="rating-col">${formatRating(c.rating, c.rating_count)}</td>
       <td class="contact-col">${formatContactCell(c)}</td>
       <td>${formatSegmentBadge(c.segment, c.enrichment_source)}</td>
       <td class="status-cell"><span class="status-${status.state}">${status.text}</span></td>
@@ -787,6 +788,13 @@ function sortCompanies(list) {
       const tierOrder = { ceo: 0, named: 1, generic: 2, none: 3 };
       aVal = tierOrder[getContactTier(a)] ?? 4;
       bVal = tierOrder[getContactTier(b)] ?? 4;
+    }
+
+    // Handle nulls - for rating, push to end
+    if (sortColumn === 'rating') {
+      if (aVal == null && bVal == null) return 0;
+      if (aVal == null) return sortDirection === 'asc' ? 1 : -1;
+      if (bVal == null) return sortDirection === 'asc' ? -1 : 1;
     }
 
     // Handle nulls
@@ -1812,6 +1820,14 @@ function formatSegmentBadge(segment, enrichmentSource) {
 
   const colors = SEGMENT_COLORS[segment] || SEGMENT_COLORS['Other'];
   return `<span class="segment-badge" style="background:${colors.bg};color:${colors.text}">${escapeHtml(segment)}</span>`;
+}
+
+function formatRating(rating, count) {
+  // null/undefined = no Google data
+  if (rating == null) return '<span style="color:#9CA3AF">-</span>';
+  // Format: "4.2 (3)" or "4.2 (1.2k)" for large counts
+  const displayCount = count >= 1000 ? (count / 1000).toFixed(1) + 'k' : count || 0;
+  return `${rating.toFixed(1)} (${displayCount})`;
 }
 
 function getContactTier(company) {

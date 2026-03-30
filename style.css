@@ -2229,6 +2229,14 @@ header h1 {
   font-size: 13px;
 }
 
+/* Rating column */
+.rating-col {
+  width: 80px;
+  min-width: 80px;
+  text-align: center;
+  white-space: nowrap;
+}
+
 /* Status column */
 .status-col {
   width: 100px;
