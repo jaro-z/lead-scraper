@@ -2,6 +2,22 @@
 
 Local app for scraping business leads from Google Places API.
 
+## Quick Commands
+
+- **`.p`** → Prep for shipping. Run in this exact order:
+  1. Run `/simplify` on all changed files to clean up the code
+  2. Run `npm run build` to verify nothing broke (skip if no build step)
+  3. Run `/review` on the branch diff to catch logic errors or security issues
+  4. Check for sensitive files (`.env`, API keys, secrets, credentials) not in `.gitignore` and add them
+  5. List what changed and tell me what to test in the browser
+  6. Run `/fewer-permission-prompts` and suggest new permissions to add to my config
+- **`.c`** → Ship to production. Assumes `.p` already ran:
+  1. Delete any plan files or temporary MD files created during this feature that are no longer needed
+  2. Stage changed files, write a fitting commit message, commit, and push the current branch
+  3. Switch to `main`, pull latest, merge the feature branch into main (using `--no-ff`), and push main
+  4. Switch back to the previous branch and merge main into it so the working branch stays up to date
+  5. If already on `main`, skip steps 3-4 and just commit + push main directly.
+
 ## Working Style
 
 - **Plans should be ELI10** - Explain what happens in plain language, no code snippets

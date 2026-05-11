@@ -31,7 +31,7 @@ const DEFAULT_CONFIDENCE = {
  * @param {string} hunterApiKey - Hunter.io API key
  * @returns {Promise<{contacts: Array, emailsRecovered: number, log: Object}>}
  */
-async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
+async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey, decisions = []) {
   const log = {
     contactsChecked: 0,
     emailsRecovered: 0,
@@ -85,6 +85,11 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
         if (shouldUsePatternFirst) {
           log.emailsRecovered++;
           log.patternsGenerated++;
+          decisions.push({
+            step: 'email_source', contact: contact.name || contact.firstName,
+            decision: 'pattern', reason: `derived pattern has ${derivedPattern.matches} match(es)`,
+            patternMatches: derivedPattern.matches, email: patternEmail
+          });
           enrichedContacts.push({
             ...contact,
             email: patternEmail,
@@ -101,6 +106,11 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
 
           if (result.email) {
             log.emailsRecovered++;
+            decisions.push({
+              step: 'email_source', contact: contact.name || contact.firstName,
+              decision: 'hunter', reason: 'Hunter email-finder returned result',
+              email: result.email
+            });
             enrichedContacts.push({
               ...contact,
               email: result.email,
@@ -112,10 +122,14 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
             continue;
           }
 
-          // Hunter returned nothing — try pattern as fallback
           if (patternEmail) {
             log.emailsRecovered++;
             log.patternsGenerated++;
+            decisions.push({
+              step: 'email_source', contact: contact.name || contact.firstName,
+              decision: 'pattern_fallback', reason: 'Hunter returned nothing, fell back to derived pattern',
+              patternMatches: derivedPattern?.matches, email: patternEmail
+            });
             enrichedContacts.push({
               ...contact,
               email: patternEmail,
@@ -126,22 +140,33 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
             console.log(`[Waterfall] Hunter found nothing for ${contact.name || contact.firstName}, falling back to derived pattern: ${patternEmail}`);
             continue;
           }
+
+          decisions.push({
+            step: 'email_source', contact: contact.name || contact.firstName,
+            decision: 'dropped', reason: 'Hunter returned nothing and no pattern available'
+          });
         } else if (!shouldUsePatternFirst && !shouldCallHunter) {
-          // No Hunter key and no pattern available
+          decisions.push({
+            step: 'email_source', contact: contact.name || contact.firstName,
+            decision: 'dropped', reason: 'no Hunter key and no pattern available'
+          });
           enrichedContacts.push(contact);
           continue;
         }
 
-        // Full-name contact, nothing worked
         enrichedContacts.push(contact);
       }
-      // Branch B: Contact has FIRST NAME ONLY → use domain pattern approach (unchanged)
+      // Branch B: Contact has FIRST NAME ONLY
       else {
-        // Try derived pattern first (FREE)
         const patternEmail = applyDerivedPattern(derivedPattern, contact, domain);
         if (patternEmail) {
           log.emailsRecovered++;
           log.patternsGenerated++;
+          decisions.push({
+            step: 'first_name_email', contact: contact.name || contact.firstName,
+            decision: 'pattern', reason: 'derived pattern applied to first-name-only contact',
+            email: patternEmail
+          });
           enrichedContacts.push({
             ...contact,
             email: patternEmail,
@@ -153,8 +178,11 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
           continue;
         }
 
-        // No derived pattern — try Hunter first-name pattern generation
         if (!hunterApiKey) {
+          decisions.push({
+            step: 'first_name_email', contact: contact.name || contact.firstName,
+            decision: 'dropped', reason: 'no pattern and no Hunter key'
+          });
           enrichedContacts.push(contact);
           continue;
         }
@@ -167,6 +195,11 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
         if (patternResult.email) {
           log.emailsRecovered++;
           log.firstNamePatterns = (log.firstNamePatterns || 0) + 1;
+          decisions.push({
+            step: 'first_name_email', contact: firstName,
+            decision: 'hunter_generate', reason: 'Hunter generated email from first name + domain pattern',
+            email: patternResult.email
+          });
           enrichedContacts.push({
             ...contact,
             email: patternResult.email,
@@ -177,6 +210,10 @@ async function enrichContactsWithMissingEmails(contacts, domain, hunterApiKey) {
           });
           console.log(`[Waterfall] Generated email for first-name "${firstName}": ${patternResult.email} (confidence: ${Math.min(patternResult.confidence, 15)}, UNVERIFIED GUESS)`);
         } else {
+          decisions.push({
+            step: 'first_name_email', contact: firstName,
+            decision: 'dropped', reason: 'Hunter could not generate email from first name'
+          });
           enrichedContacts.push(contact);
         }
       }
@@ -306,7 +343,8 @@ function applyDerivedPattern(derivedPattern, contact, domain) {
  * @returns {Promise<{source: 'web_scrape'|'hunter'|null, contacts: Array, log: Object}>}
  */
 async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
-  // Initialize combined log
+  const startedAt = Date.now();
+  const decisions = [];
   const log = {
     source: null,
     webScrape: null,
@@ -314,18 +352,20 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
   };
 
   if (!domain) {
-    return { source: null, contacts: [], companyId, log, error: 'No domain provided' };
+    return { source: null, contacts: [], companyId, log, decisions, duration: 0, error: 'No domain provided' };
   }
 
-  // Detect preferred protocol from original URL (HTTP-only sites are common for older Czech businesses)
   const preferredProtocol = options.originalUrl && options.originalUrl.startsWith('http://')
     ? 'http' : 'https';
 
-  // Clean domain (remove protocol, www, trailing slashes)
   const cleanDomain = domain
     .replace(/^https?:\/\//, '')
     .replace(/^www\./, '')
     .replace(/\/$/, '');
+
+  const makeResult = (extra) => ({
+    ...extra, companyId, log, decisions, duration: Date.now() - startedAt
+  });
 
   // Step 1: Try web scraping (FREE)
   try {
@@ -335,34 +375,37 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
 
     if (scrapedContacts.length > 0) {
       console.log(`[Waterfall] Found ${scrapedContacts.length} contacts via web scrape for ${cleanDomain}`);
+      decisions.push({
+        step: 'web_scrape', result: 'found', contactCount: scrapedContacts.length
+      });
 
-      // Normalize contacts first
       let normalizedContacts = normalizeContacts(scrapedContacts, 'web_scrape');
 
       // Step 1.5: Try to recover emails for contacts with names but no emails
       const contactsWithoutEmails = normalizedContacts.filter(c => !c.email && (c.name || c.firstName));
       if (contactsWithoutEmails.length > 0 && hunterApiKey) {
         console.log(`[Waterfall] Attempting to recover emails for ${contactsWithoutEmails.length} contacts without emails`);
-        const enrichResult = await enrichContactsWithMissingEmails(normalizedContacts, cleanDomain, hunterApiKey);
+        const enrichResult = await enrichContactsWithMissingEmails(normalizedContacts, cleanDomain, hunterApiKey, decisions);
         normalizedContacts = enrichResult.contacts;
         log.emailRecovery = enrichResult.log;
+
+        decisions.push({
+          step: 'email_recovery',
+          contactsChecked: enrichResult.log.contactsChecked,
+          emailsRecovered: enrichResult.emailsRecovered
+        });
 
         if (enrichResult.emailsRecovered > 0) {
           console.log(`[Waterfall] Recovered ${enrichResult.emailsRecovered} emails via Hunter email-finder`);
         }
       }
 
-      // Step 1.7: If we have NO real personal emails, try Hunter for decision-makers
-      // Triggers when: only generic emails, OR all emails are pattern-fabricated
-      // Also fires when scraping found contacts but none have real personal emails
-      // (e.g., site returned near-empty HTML with only info@ — foxhunter.cz regression fix)
       const hasRealPersonalEmail = normalizedContacts.some(c =>
         c.email && !c.isGenericFallback &&
         c.emailSource !== 'pattern_derived' &&
         c.emailSource !== 'first_name_pattern'
       );
 
-      // Determine whether any pattern-derived emails exist (not just generic/name-only)
       const hasPatternDerivedEmail = normalizedContacts.some(c =>
         c.email &&
         (c.emailSource === 'pattern_derived' || c.emailSource === 'first_name_pattern')
@@ -370,12 +413,16 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
 
       if (!hasRealPersonalEmail && hunterApiKey) {
         console.log(`[Waterfall] No real personal emails found - searching Hunter for decision-makers at ${cleanDomain}`);
+        decisions.push({
+          step: 'personal_email_check', hasReal: false,
+          hasPatternOnly: hasPatternDerivedEmail,
+          action: 'dm_search'
+        });
         try {
           const dmResult = await hunter.searchDecisionMakers(cleanDomain, hunterApiKey);
           log.decisionMakerSearch = { found: dmResult.contacts.length, pattern: dmResult.pattern };
 
           if (dmResult.contacts.length > 0) {
-            // Add decision-maker contacts from Hunter alongside existing contacts
             const dmNormalized = dmResult.contacts.map(c => ({
               name: c.fullName || null,
               firstName: c.firstName || null,
@@ -396,9 +443,14 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
           console.warn(`[Waterfall] Decision-maker search failed for ${cleanDomain}:`, dmError.message);
           log.decisionMakerSearch = { error: dmError.message };
         }
+      } else if (hasRealPersonalEmail) {
+        decisions.push({
+          step: 'personal_email_check', hasReal: true,
+          hasPatternOnly: false,
+          action: 'return'
+        });
       }
 
-      // Only return early if web scraping found actual personal emails (not generic or pattern-derived)
       const webScrapeFoundPersonalEmail = normalizedContacts.some(c =>
         c.email && !c.isGenericFallback &&
         c.source === 'web_scrape' &&
@@ -407,18 +459,28 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
 
       if (webScrapeFoundPersonalEmail) {
         log.source = 'web_scrape';
-        return { source: 'web_scrape', contacts: normalizedContacts, companyId, log };
+        return makeResult({ source: 'web_scrape', contacts: normalizedContacts });
       }
 
-      // No personal emails found — fall through to Hunter domain-search
       console.log(`[Waterfall] Web scrape found no personal emails — falling through to full Hunter domain-search for ${cleanDomain}`);
+      decisions.push({
+        step: 'personal_email_check', hasReal: false,
+        hasPatternOnly: hasPatternDerivedEmail,
+        action: 'fallthrough'
+      });
       log.webScrape = scrapeResult.log;
       log.webScrapeContacts = normalizedContacts;
+    } else {
+      decisions.push({
+        step: 'web_scrape', result: 'empty', contactCount: 0
+      });
     }
   } catch (error) {
     console.warn(`[Waterfall] Web scraping failed for ${cleanDomain}:`, error.message);
     log.webScrape = { error: error.message };
-    // Continue to fallback
+    decisions.push({
+      step: 'web_scrape', result: 'error', error: error.message
+    });
   }
 
   // Step 2: Fallback to Hunter.io (PAID)
@@ -435,38 +497,54 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
         const hunterEmails = new Set(hunterNormalized.map(c => c.email?.toLowerCase()).filter(Boolean));
         const webScrapeContacts = log.webScrapeContacts || [];
 
-        // Keep web scrape contacts with emails not in Hunter results
         const uniqueWebScrapeContacts = webScrapeContacts.filter(c =>
           c.email && !c.isGenericFallback && !hunterEmails.has(c.email.toLowerCase())
         );
+
+        decisions.push({
+          step: 'hunter_domain', result: 'found',
+          hunterCount: hunterContacts.length,
+          mergedWebScrape: uniqueWebScrapeContacts.length
+        });
 
         if (uniqueWebScrapeContacts.length > 0) {
           console.log(`[Waterfall] Merged ${uniqueWebScrapeContacts.length} email-finder contacts with Hunter results`);
         }
 
         log.source = 'hunter';
-        return {
+        return makeResult({
           source: 'hunter',
           contacts: [...hunterNormalized, ...uniqueWebScrapeContacts],
-          companyId,
-          organization: hunterResult.organization,
-          log
-        };
+          organization: hunterResult.organization
+        });
+      } else {
+        decisions.push({
+          step: 'hunter_domain', result: 'empty'
+        });
       }
     } catch (error) {
       console.warn(`[Waterfall] Hunter.io failed for ${cleanDomain}:`, error.message);
       log.hunter = { error: error.message };
+      decisions.push({
+        step: 'hunter_domain', result: 'error', error: error.message
+      });
     }
   } else {
     console.log(`[Waterfall] No Hunter API key provided, skipping paid fallback for ${cleanDomain}`);
     log.hunter = { skipped: true, reason: 'no_api_key' };
+    decisions.push({
+      step: 'hunter_domain', result: 'skipped', reason: 'no_api_key'
+    });
   }
 
   // Step 3: Last resort - generate info@domain as tier-3 fallback
   console.log(`[Waterfall] No contacts found for ${cleanDomain}, generating info@ fallback`);
+  decisions.push({
+    step: 'generic_fallback', email: `info@${cleanDomain}`
+  });
   log.source = 'generic_fallback';
   log.genericFallback = true;
-  return {
+  return makeResult({
     source: 'generic_fallback',
     contacts: [{
       name: 'General Contact',
@@ -479,10 +557,8 @@ async function discoverContacts(companyId, domain, hunterApiKey, options = {}) {
       confidence: 10,
       isDecisionMaker: false,
       isGenericFallback: true
-    }],
-    companyId,
-    log
-  };
+    }]
+  });
 }
 
 /**

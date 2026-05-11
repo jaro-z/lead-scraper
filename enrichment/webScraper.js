@@ -1273,7 +1273,7 @@ async function scrapeTeamPages(domain, options = {}) {
   // Track which contacts were kept
   for (const contact of finalContacts) {
     if (contact.email && !contact.isGenericFallback) {
-      log.contactsKept.push({ name: contact.name, role: contact.role, email: contact.email });
+      log.contactsKept.push({ name: contact.name, role: contact.role, email: contact.email, emailSource: contact.emailSource || 'web_scrape' });
     }
   }
 

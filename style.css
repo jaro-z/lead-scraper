@@ -2529,6 +2529,25 @@ header h1 {
   color: #EF4444;
 }
 
+.run-selector {
+  background: #374151;
+  color: #E5E7EB;
+  border: 1px solid #4B5563;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  margin-left: 8px;
+  cursor: pointer;
+}
+
+.enrichment-log .decision-trace.collapsed .log-item {
+  display: none;
+}
+
+.enrichment-log .decision-trace.collapsed .log-header svg {
+  transform: rotate(-90deg);
+}
+
 /* No Website stage pill styling - only highlight when active */
 .stage-pill[data-stage="no_website"].active {
   background: #F59E0B;

@@ -506,11 +506,22 @@ app.get('/api/companies/:id/enrichment-log', asyncHandler((req, res) => {
   const company = getCompanyOrFail(req.params.id, res);
   if (!company) return;
 
-  const log = db.getEnrichmentLog(company.id);
+  const fullLog = db.getEnrichmentLogFull(company.id);
+  let log = null;
+  let runs = null;
+  if (fullLog) {
+    if (fullLog.version === 2 && fullLog.runs && fullLog.runs.length > 0) {
+      log = fullLog.runs[fullLog.runs.length - 1].log;
+      runs = fullLog.runs;
+    } else {
+      log = fullLog;
+    }
+  }
   res.json({
     company_id: company.id,
     enrichment_error: company.enrichment_error || null,
-    log: log || null
+    log,
+    runs
   });
 }));
 
@@ -632,11 +643,18 @@ app.post('/api/companies/:id/enrich-full', fullEnrichLimiter, asyncHandler(async
     }
   });
 
-  // Save enrichment log
+  // Save enrichment log with decision trace
   if (contactResult && contactResult.log) {
     try {
-      db.saveEnrichmentLog(company.id, contactResult.log);
-      result.enrichment_log = contactResult.log;
+      const enrichmentLog = { ...contactResult.log };
+      if (contactResult.decisions) {
+        enrichmentLog.decisions = contactResult.decisions;
+      }
+      if (contactResult.duration != null) {
+        enrichmentLog.duration = contactResult.duration;
+      }
+      db.saveEnrichmentLog(company.id, enrichmentLog, domain);
+      result.enrichment_log = enrichmentLog;
     } catch (logErr) {
       result.errors.push({ step: 'saveEnrichmentLog', error: logErr.message });
     }
@@ -747,7 +765,10 @@ app.post('/api/companies/enrich-batch', batchEnrichLimiter, asyncHandler(async (
       // Save enrichment log for diagnostics
       if (contactResult.log) {
         try {
-          db.saveEnrichmentLog(company.id, contactResult.log);
+          const enrichmentLog = { ...contactResult.log };
+          if (contactResult.decisions) enrichmentLog.decisions = contactResult.decisions;
+          if (contactResult.duration != null) enrichmentLog.duration = contactResult.duration;
+          db.saveEnrichmentLog(company.id, enrichmentLog, domain);
         } catch {
           // Continue even if log save fails
         }

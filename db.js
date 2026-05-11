@@ -122,15 +122,15 @@ db.exec(`UPDATE companies SET pipeline_stage = 'qualified' WHERE pipeline_stage 
 // Migration: Fix companies without website stuck in 'raw' stage
 db.exec(`UPDATE companies SET pipeline_stage = 'no_website' WHERE (pipeline_stage = 'raw' OR pipeline_stage IS NULL) AND (website IS NULL OR website = '')`);
 
-// Migration: Backfill orphaned manually-added companies into the "Manual adds" search
-// so they become visible on the dashboard. Idempotent — INSERT OR IGNORE + count refresh.
-(() => {
+// Re-link orphaned manually-added companies into "Manual adds" search.
+// Called on startup and after any search deletion.
+function relinkOrphanedManualCompanies() {
   const orphans = db.prepare(`
     SELECT c.id FROM companies c
     LEFT JOIN search_companies sc ON sc.company_id = c.id
     WHERE c.place_id LIKE 'manual_%' AND sc.company_id IS NULL
   `).all();
-  if (orphans.length === 0) return;
+  if (orphans.length === 0) return 0;
 
   let manualSearch = db.prepare(`SELECT id FROM searches WHERE query = 'Manual adds' LIMIT 1`).get();
   if (!manualSearch) {
@@ -152,8 +152,14 @@ db.exec(`UPDATE companies SET pipeline_stage = 'no_website' WHERE (pipeline_stag
     WHERE id = ?
   `).run(manualSearch.id, manualSearch.id);
 
-  console.log(`[migration] Linked ${orphans.length} orphaned manual company(ies) into "Manual adds" search (id ${manualSearch.id})`);
-})();
+  return orphans.length;
+}
+
+// Run on startup
+const startupOrphans = relinkOrphanedManualCompanies();
+if (startupOrphans > 0) {
+  console.log(`[migration] Linked ${startupOrphans} orphaned manual company(ies) into "Manual adds" search`);
+}
 
 // Contact enrichment columns
 addColumnIfMissing('contacts', 'phone', 'TEXT');
@@ -194,9 +200,9 @@ function updateSearchStatus(id, status, resultCount = null) {
 }
 
 function deleteSearch(id) {
-  // Remove from junction table first
   db.prepare(`DELETE FROM search_companies WHERE search_id = ?`).run(id);
   db.prepare(`DELETE FROM searches WHERE id = ?`).run(id);
+  relinkOrphanedManualCompanies();
 }
 
 // ============ Companies ============
@@ -297,18 +303,39 @@ function getCompanyById(id) {
   return db.prepare(`SELECT * FROM companies WHERE id = ?`).get(id);
 }
 
+function refreshSearchCounts(searchIds) {
+  for (const searchId of searchIds) {
+    db.prepare(`
+      UPDATE searches SET result_count = (
+        SELECT COUNT(*) FROM search_companies WHERE search_id = ?
+      ) WHERE id = ?
+    `).run(searchId, searchId);
+  }
+}
+
 function deleteCompany(id) {
+  const affectedSearches = db.prepare(
+    `SELECT search_id FROM search_companies WHERE company_id = ?`
+  ).all(id).map(r => r.search_id);
+
+  db.prepare(`DELETE FROM contacts WHERE company_id = ?`).run(id);
   db.prepare(`DELETE FROM search_companies WHERE company_id = ?`).run(id);
   db.prepare(`DELETE FROM companies WHERE id = ?`).run(id);
+  refreshSearchCounts(affectedSearches);
 }
 
 function bulkDeleteCompanies(ids) {
   const validatedIds = validateIds(ids);
   const placeholders = validatedIds.map(() => '?').join(',');
 
+  const affectedSearches = db.prepare(
+    `SELECT DISTINCT search_id FROM search_companies WHERE company_id IN (${placeholders})`
+  ).all(...validatedIds).map(r => r.search_id);
+
   db.prepare(`DELETE FROM search_companies WHERE company_id IN (${placeholders})`).run(...validatedIds);
   db.prepare(`DELETE FROM contacts WHERE company_id IN (${placeholders})`).run(...validatedIds);
   db.prepare(`DELETE FROM companies WHERE id IN (${placeholders})`).run(...validatedIds);
+  refreshSearchCounts(affectedSearches);
 }
 
 function getExistingPlaceIds() {
@@ -934,17 +961,50 @@ function updateCompanyDescription(id, description) {
 }
 
 /**
- * Save enrichment log (JSON object with URLs discovered, pages scraped, contacts parsed)
+ * Save enrichment log as versioned history (appends run, keeps last 10).
+ * Wraps in a transaction so concurrent re-enrichments can't lose a run.
  * @param {number} id - Company ID
- * @param {Object} log - Enrichment log object
+ * @param {Object} log - Enrichment log object for this run
+ * @param {string} [domain] - Domain that was enriched
  */
-function saveEnrichmentLog(id, log) {
-  const logJson = JSON.stringify(log);
+const saveEnrichmentLog = db.transaction((id, log, domain) => {
+  const MAX_RUNS = 10;
+  const row = db.prepare(`SELECT enrichment_log FROM companies WHERE id = ?`).get(id);
+  let versioned;
+
+  if (row && row.enrichment_log) {
+    try {
+      const existing = JSON.parse(row.enrichment_log);
+      if (existing && existing.version === 2) {
+        versioned = existing;
+      } else {
+        versioned = {
+          version: 2,
+          runs: [{ timestamp: existing._migratedAt || new Date().toISOString(), log: existing }]
+        };
+      }
+    } catch (e) {
+      versioned = { version: 2, runs: [] };
+    }
+  } else {
+    versioned = { version: 2, runs: [] };
+  }
+
+  versioned.runs.push({
+    timestamp: new Date().toISOString(),
+    domain: domain || null,
+    log
+  });
+
+  if (versioned.runs.length > MAX_RUNS) {
+    versioned.runs = versioned.runs.slice(-MAX_RUNS);
+  }
+
   db.prepare(`
     UPDATE companies SET enrichment_log = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(logJson, id);
-}
+  `).run(JSON.stringify(versioned), id);
+});
 
 /**
  * Set enrichment error (e.g., 'no_contacts', 'scrape_failed')
@@ -970,11 +1030,27 @@ function clearEnrichmentError(id) {
 }
 
 /**
- * Get enrichment log for a company
+ * Get enrichment log for a company.
+ * Returns the latest run's log for backward compat with callers expecting a flat object.
+ * Use getEnrichmentLogFull() when you need all runs.
  * @param {number} id - Company ID
- * @returns {Object|null} Parsed enrichment log or null
+ * @returns {Object|null} Latest run's log object, or null
  */
 function getEnrichmentLog(id) {
+  const full = getEnrichmentLogFull(id);
+  if (!full) return null;
+  if (full.version === 2 && full.runs && full.runs.length > 0) {
+    return full.runs[full.runs.length - 1].log;
+  }
+  return full;
+}
+
+/**
+ * Get full versioned enrichment log (all runs).
+ * @param {number} id - Company ID
+ * @returns {Object|null} Versioned log { version: 2, runs: [...] } or legacy flat object, or null
+ */
+function getEnrichmentLogFull(id) {
   const row = db.prepare(`SELECT enrichment_log FROM companies WHERE id = ?`).get(id);
   if (!row || !row.enrichment_log) return null;
   try {
@@ -1034,5 +1110,6 @@ module.exports = {
   saveEnrichmentLog,
   setEnrichmentError,
   clearEnrichmentError,
-  getEnrichmentLog
+  getEnrichmentLog,
+  getEnrichmentLogFull
 };

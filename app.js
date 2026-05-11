@@ -776,14 +776,20 @@ function startAddUrlProgress(domain) {
   pct.textContent = '0%';
   label.textContent = domain ? `Enriching ${domain}…` : 'Enriching…';
 
-  // Assume ~25s typical duration; ease toward 92% asymptotically so it never stalls visibly.
-  const startedAt = Date.now();
-  const targetMs = 25000;
+  let startedAt = Date.now();
+  let targetMs = 25000;
+  let labelSwitched = false;
   stopAddUrlProgress();
   addUrlProgressTimer = setInterval(() => {
     const elapsed = Date.now() - startedAt;
-    // Asymptotic curve: 92 * (1 - e^(-t/targetMs)). At t=targetMs → ~58%; at 3x → ~88%; caps ~92%.
-    const pctValue = Math.min(92, 92 * (1 - Math.exp(-elapsed / targetMs)));
+    if (!labelSwitched && elapsed > 45000) {
+      label.textContent = 'Still working, complex site...';
+      const currentFraction = 1 - Math.exp(-elapsed / targetMs);
+      targetMs = 50000;
+      startedAt = Date.now() + targetMs * Math.log(1 - currentFraction);
+      labelSwitched = true;
+    }
+    const pctValue = Math.min(92, 92 * (1 - Math.exp(-(Date.now() - startedAt) / targetMs)));
     fill.style.width = pctValue.toFixed(1) + '%';
     pct.textContent = Math.round(pctValue) + '%';
   }, 200);
@@ -1572,7 +1578,7 @@ async function showDetails(id) {
     const logRes = await fetch(`/api/companies/${id}/enrichment-log`);
     const logData = await logRes.json();
     if (logData.log || logData.enrichment_error) {
-      enrichmentLogHtml = buildEnrichmentLogHtml(logData.log, logData.enrichment_error);
+      enrichmentLogHtml = buildEnrichmentLogHtml(logData.log, logData.enrichment_error, logData.runs);
     }
   } catch (e) {
     console.warn('Failed to fetch enrichment log:', e);
@@ -1869,15 +1875,66 @@ function hideModal(modal) {
 }
 
 /**
- * Build HTML for enrichment log display
- * @param {Object} log - Enrichment log object from webScraper
- * @param {string} error - Enrichment error type (e.g., 'no_contacts')
+ * Build HTML for enrichment log display with optional run dropdown.
+ * @param {Object} log - Latest run's enrichment log (or legacy flat log)
+ * @param {string} error - Enrichment error type
+ * @param {Array|null} runs - All runs from versioned log (null for legacy)
  * @returns {string} HTML string
  */
-function buildEnrichmentLogHtml(log, error) {
+function buildEnrichmentLogHtml(log, error, runs) {
   if (!log && !error) return '';
 
-  // Determine final result based on all waterfall steps
+  const hasMultipleRuns = runs && runs.length > 1;
+
+  let runDropdownHtml = '';
+  if (hasMultipleRuns) {
+    const options = runs.map((r, i) => {
+      const date = new Date(r.timestamp).toLocaleString('cs-CZ', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+      const domain = r.domain ? ` (${escapeHtml(r.domain)})` : '';
+      const selected = i === runs.length - 1 ? ' selected' : '';
+      return `<option value="${i}"${selected}>${date}${domain}</option>`;
+    }).join('');
+    runDropdownHtml = `<select class="run-selector" onchange="switchEnrichmentRun(this)">${options}</select>`;
+  }
+
+  let runsHtml = '';
+  if (hasMultipleRuns) {
+    runsHtml = runs.map((r, i) => {
+      const hidden = i === runs.length - 1 ? '' : ' style="display:none"';
+      return `<div class="enrichment-run" data-run-index="${i}"${hidden}>${buildSingleRunLogHtml(r.log, i === runs.length - 1 ? error : null)}</div>`;
+    }).join('');
+  } else {
+    runsHtml = `<div class="enrichment-run">${buildSingleRunLogHtml(log, error)}</div>`;
+  }
+
+  return `
+    <div class="field enrichment-log-section">
+      <div class="field-label">
+        Enrichment Log ${runDropdownHtml}
+        <button class="log-toggle" onclick="this.parentElement.parentElement.classList.toggle('collapsed')">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="enrichment-log">
+        ${runsHtml}
+      </div>
+    </div>
+  `;
+}
+
+function switchEnrichmentRun(select) {
+  const container = select.closest('.enrichment-log-section');
+  const allRuns = container.querySelectorAll('.enrichment-run');
+  allRuns.forEach(r => r.style.display = 'none');
+  const selected = container.querySelector(`[data-run-index="${select.value}"]`);
+  if (selected) selected.style.display = '';
+}
+
+function buildSingleRunLogHtml(log, error) {
+  if (!log && !error) return '<div class="log-item">No log data</div>';
+
   const webResult = log?.webScrape?.result;
   const hunterFound = log?.hunter?.found > 0;
   const patternFound = log?.decisionMakerSearch?.found > 0;
@@ -1899,7 +1956,7 @@ function buildEnrichmentLogHtml(log, error) {
   } else if (webResult === 'generic_only') {
     resultClass = 'warning';
     const genericEmails = log?.webScrape?.genericEmailsFound || [];
-    resultText = `No personal contacts — only generic: ${genericEmails.join(', ') || 'none'}`;
+    resultText = `No personal contacts, only generic: ${genericEmails.map(e => escapeHtml(e)).join(', ') || 'none'}`;
   } else if (webResult === 'partial') {
     resultClass = 'warning';
     resultText = 'Found names but no emails';
@@ -1908,67 +1965,95 @@ function buildEnrichmentLogHtml(log, error) {
     resultText = 'No contacts found';
   }
 
+  // Run metadata
+  let metaHtml = '';
+  if (log?.duration != null) {
+    metaHtml = `<div class="log-section"><div class="log-header">Duration: ${(log.duration / 1000).toFixed(1)}s</div></div>`;
+  }
+
   const webLog = log?.webScrape || {};
   const urlsDiscovered = webLog.urlsDiscovered || 0;
   const pagesScraped = webLog.pagesScraped || [];
   const contactsKept = webLog.contactsKept || [];
   const genericSkipped = webLog.genericEmailsSkipped || [];
 
-  // Build pages scraped list
   let pagesHtml = '';
   if (pagesScraped.length > 0) {
     pagesHtml = pagesScraped.map(p => {
       const shortUrl = p.url.replace(/^https?:\/\/[^/]+/, '');
       const statusIcon = p.status === 'success' ? '✓' : p.status === 'error' ? '✗' : '○';
-      return `<div class="log-item">├─ ${escapeHtml(shortUrl)} (${p.category}) ${statusIcon}</div>`;
+      return `<div class="log-item">├─ ${escapeHtml(shortUrl)} (${escapeHtml(p.category)}) ${statusIcon}</div>`;
     }).join('');
   } else {
     pagesHtml = '<div class="log-item">└─ No pages scraped</div>';
   }
 
-  // Build contacts list
   let contactsHtml = '';
   if (contactsKept.length > 0) {
     contactsHtml = contactsKept.map(c => {
       const role = c.role ? ` (${escapeHtml(c.role)})` : '';
-      return `<div class="log-item">├─ ${escapeHtml(c.name || 'Unknown')}${role} - ${escapeHtml(c.email)} ✓</div>`;
+      const srcTag = c.emailSource && c.emailSource !== 'web_scrape' ? ` [${escapeHtml(c.emailSource)}]` : '';
+      return `<div class="log-item">├─ ${escapeHtml(c.name || 'Unknown')}${role} - ${escapeHtml(c.email)}${srcTag} ✓</div>`;
     }).join('');
   }
   if (genericSkipped.length > 0) {
-    contactsHtml += `<div class="log-item log-skipped">└─ Skipped: ${genericSkipped.map(e => escapeHtml(e)).join(', ')}</div>`;
+    contactsHtml += `<div class="log-item log-skipped">└─ Filtered: ${genericSkipped.map(e => escapeHtml(e) + ' (generic)').join(', ')}</div>`;
   }
   if (!contactsHtml) {
     contactsHtml = '<div class="log-item">└─ No contacts extracted</div>';
   }
 
-  return `
-    <div class="field enrichment-log-section">
-      <div class="field-label">
-        Enrichment Log
-        <button class="log-toggle" onclick="this.parentElement.parentElement.classList.toggle('collapsed')">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+  // Contacts filtered from decisions
+  const decisions = log?.decisions || [];
+  const droppedDecisions = decisions.filter(d => d.decision === 'dropped');
+  let filteredHtml = '';
+  if (droppedDecisions.length > 0) {
+    filteredHtml = `<div class="log-section">
+      <div class="log-header">Contacts filtered: ${droppedDecisions.length}</div>
+      ${droppedDecisions.map(d => `<div class="log-item log-skipped">├─ ${escapeHtml(d.contact || '?')}: ${escapeHtml(d.reason)}</div>`).join('')}
+    </div>`;
+  }
+
+  // Decision trace (collapsible, collapsed by default)
+  let decisionTraceHtml = '';
+  if (decisions.length > 0) {
+    const traceItems = decisions.map((d, i) => {
+      const detail = d.decision ? ` → ${escapeHtml(d.decision)}` : '';
+      const reason = d.reason ? `: ${escapeHtml(d.reason)}` : '';
+      const extra = d.email ? ` (${escapeHtml(d.email)})` : '';
+      return `<div class="log-item">├─ ${i + 1}. ${escapeHtml(d.step)}${detail}${reason}${extra}</div>`;
+    }).join('');
+    decisionTraceHtml = `
+      <div class="log-section decision-trace collapsed">
+        <div class="log-header" style="cursor:pointer" onclick="this.parentElement.classList.toggle('collapsed')">
+          Decision trace (${decisions.length})
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:inline-block;vertical-align:middle;margin-left:4px">
             <path d="M6 9l6 6 6-6"/>
           </svg>
-        </button>
-      </div>
-      <div class="enrichment-log">
-        <div class="log-section">
-          <div class="log-header">URLs discovered: ${urlsDiscovered}</div>
         </div>
-        <div class="log-section">
-          <div class="log-header">Pages scraped: ${pagesScraped.length}</div>
-          ${pagesHtml}
-        </div>
-        <div class="log-section">
-          <div class="log-header">Contacts extracted: ${contactsKept.length}</div>
-          ${contactsHtml}
-        </div>
-        ${buildHunterLogHtml(log)}
-        ${buildDecisionMakerLogHtml(log)}
-        <div class="log-result ${resultClass}">
-          Result: ${resultClass === 'success' ? '✓' : resultClass === 'warning' ? '⚠' : '✗'} ${resultText}
-        </div>
-      </div>
+        ${traceItems}
+      </div>`;
+  }
+
+  return `
+    ${metaHtml}
+    <div class="log-section">
+      <div class="log-header">URLs discovered: ${urlsDiscovered}</div>
+    </div>
+    <div class="log-section">
+      <div class="log-header">Pages scraped: ${pagesScraped.length}</div>
+      ${pagesHtml}
+    </div>
+    <div class="log-section">
+      <div class="log-header">Contacts extracted: ${contactsKept.length}</div>
+      ${contactsHtml}
+    </div>
+    ${buildHunterLogHtml(log)}
+    ${buildDecisionMakerLogHtml(log)}
+    ${filteredHtml}
+    ${decisionTraceHtml}
+    <div class="log-result ${resultClass}">
+      Result: ${resultClass === 'success' ? '✓' : resultClass === 'warning' ? '⚠' : '✗'} ${resultText}
     </div>
   `;
 }
@@ -1980,7 +2065,7 @@ function buildHunterLogHtml(log) {
       return `<div class="log-section"><div class="log-header">Hunter.io: decision-maker search only</div><div class="log-item">${dmFound > 0 ? '✓' : '○'} ${dmFound} decision-maker${dmFound !== 1 ? 's' : ''} found</div></div>`;
     }
     const contactsKept = log?.webScrape?.contactsKept?.length || 0;
-    const reason = contactsKept > 0 ? `Not needed — web scraping found ${contactsKept} personal contact${contactsKept > 1 ? 's' : ''}` : 'Not needed — web scraping found contacts';
+    const reason = contactsKept > 0 ? `Not needed, web scraping found ${contactsKept} personal contact${contactsKept > 1 ? 's' : ''}` : 'Not needed, web scraping found contacts';
     return `<div class="log-section"><div class="log-header">Hunter.io: skipped</div><div class="log-item log-skipped">└─ ${reason}</div></div>`;
   }
   const h = log.hunter;
@@ -1997,7 +2082,6 @@ function buildHunterLogHtml(log) {
 
 function buildDecisionMakerLogHtml(log) {
   if (!log?.decisionMakerSearch) {
-    // Only show this section if there was a reason to look (generic-only emails)
     if (log?.webScrape?.genericEmailsOnly) {
       return `<div class="log-section"><div class="log-header">Decision-maker search: not attempted</div><div class="log-item log-skipped">└─ No Hunter API key to search for decision-makers</div></div>`;
     }
