@@ -2399,7 +2399,6 @@ header h1 {
 .stage-dot.no_website { background: #F59E0B; }
 .stage-dot.enriched { background: #8B5CF6; }
 .stage-dot.qualified { background: #10B981; }
-.stage-dot.ready { background: #3B82F6; }
 .stage-dot.parked { background: #9CA3AF; }
 
 /* ============ Enrichment Log ============ */

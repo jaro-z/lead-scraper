@@ -20,7 +20,7 @@ let sortColumn = 'name';
 let sortDirection = 'asc';
 let activeStageFilter = '';
 let isGlobalView = false; // true when viewing all companies by stage (not filtered by search)
-let pipelineStats = { raw: 0, enriched: 0, qualified: 0, ready: 0, in_notion: 0, parked: 0, total: 0 };
+let pipelineStats = { raw: 0, enriched: 0, qualified: 0, in_notion: 0, parked: 0, total: 0 };
 let allSegments = [];
 let rowStatuses = new Map(); // Track inline status per row
 
@@ -407,7 +407,6 @@ async function loadCompaniesByStage(stage, searchId) {
         no_website: 'No Website',
         enriched: 'Enriched',
         qualified: 'Qualified',
-        ready: 'Ready',
         parked: 'Parked'
       };
       document.getElementById('search-title').textContent = `All ${stageLabels[stage]} Companies`;
@@ -1374,7 +1373,7 @@ async function showDetails(id) {
   }
 
   const currentStage = company.pipeline_stage || 'raw';
-  const stages = ['raw', 'enriched', 'qualified', 'ready', 'in_notion', 'parked'];
+  const stages = ['raw', 'enriched', 'qualified', 'in_notion', 'parked'];
   const stageOptions = stages.map(s =>
     `<option value="${s}" ${s === currentStage ? 'selected' : ''}>${s.charAt(0).toUpperCase() + s.slice(1).replace('_', ' ')}</option>`
   ).join('');
@@ -2014,8 +2013,7 @@ function formatStageStatus(stage, enrichmentError) {
     raw: 'Raw',
     no_website: 'No Website',
     enriched: 'Enriched',
-    qualified: 'Qualified',
-    ready: 'Ready'
+    qualified: 'Qualified'
   };
   return stageLabels[stage] || stageLabels.raw;
 }
@@ -2028,12 +2026,11 @@ async function updatePipelineStats() {
     const res = await fetch(url);
     pipelineStats = await res.json();
 
-    // Update labels for pipeline: Raw → No Website → Enriched → Qualified → Ready
+    // Update labels for pipeline: Raw → No Website → Enriched → Qualified
     document.getElementById('stat-raw').textContent = pipelineStats.raw || 0;
     document.getElementById('stat-no_website').textContent = pipelineStats.no_website || 0;
     document.getElementById('stat-enriched').textContent = pipelineStats.enriched || 0;
     document.getElementById('stat-qualified').textContent = pipelineStats.qualified || 0;
-    document.getElementById('stat-ready').textContent = pipelineStats.ready || 0;
     document.getElementById('stat-parked').textContent = pipelineStats.parked || 0;
 
     updateMainActionButton();
@@ -2099,10 +2096,10 @@ function updatePushNotionButton() {
   const btn = document.getElementById('push-notion-btn');
   const countSpan = document.getElementById('notion-count');
 
-  // Count selected companies that can be pushed (qualified or ready, not already in Notion)
+  // Count selected companies that can be pushed (qualified, not already in Notion)
   const selectedCompanies = companies.filter(c => selectedIds.has(c.id));
   const pushableCount = selectedCompanies.filter(c =>
-    (c.pipeline_stage === 'qualified' || c.pipeline_stage === 'ready') && !c.in_notion
+    c.pipeline_stage === 'qualified' && !c.in_notion
   ).length;
 
   // Only enable when there are pushable leads selected

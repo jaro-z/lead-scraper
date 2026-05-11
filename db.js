@@ -116,6 +116,9 @@ addColumnIfMissing('companies', 'enrichment_error', 'TEXT');
 // Migration: Remove 'review' stage - move to 'enriched'
 db.exec(`UPDATE companies SET pipeline_stage = 'enriched' WHERE pipeline_stage = 'review'`);
 
+// Migration: Remove 'ready' stage - merge into 'qualified'
+db.exec(`UPDATE companies SET pipeline_stage = 'qualified' WHERE pipeline_stage = 'ready'`);
+
 // Migration: Fix companies without website stuck in 'raw' stage
 db.exec(`UPDATE companies SET pipeline_stage = 'no_website' WHERE (pipeline_stage = 'raw' OR pipeline_stage IS NULL) AND (website IS NULL OR website = '')`);
 
@@ -658,7 +661,6 @@ function getPipelineStats(searchId) {
       SUM(CASE WHEN pipeline_stage = 'no_website' OR ((pipeline_stage IS NULL OR pipeline_stage = 'raw') AND (website IS NULL OR website = '')) THEN 1 ELSE 0 END) as no_website,
       SUM(CASE WHEN pipeline_stage = 'enriched' THEN 1 ELSE 0 END) as enriched,
       SUM(CASE WHEN pipeline_stage = 'qualified' THEN 1 ELSE 0 END) as qualified,
-      SUM(CASE WHEN pipeline_stage = 'ready' THEN 1 ELSE 0 END) as ready,
       SUM(CASE WHEN in_notion = 1 THEN 1 ELSE 0 END) as in_notion,
       SUM(CASE WHEN pipeline_stage = 'parked' THEN 1 ELSE 0 END) as parked,
       COUNT(*) as total
@@ -672,7 +674,6 @@ function getPipelineStats(searchId) {
     no_website: stats.no_website || 0,
     enriched: stats.enriched || 0,
     qualified: stats.qualified || 0,
-    ready: stats.ready || 0,
     in_notion: stats.in_notion || 0,
     parked: stats.parked || 0,
     total: stats.total || 0
@@ -687,7 +688,7 @@ function getPipelineStats(searchId) {
  * @returns {Array} Companies matching the stage
  */
 function getCompaniesByStage(stage, searchId) {
-  const validStages = ['raw', 'no_website', 'enriched', 'qualified', 'ready', 'parked'];
+  const validStages = ['raw', 'no_website', 'enriched', 'qualified', 'parked'];
   if (!validStages.includes(stage)) {
     throw new Error(`Invalid pipeline stage: ${stage}`);
   }
@@ -728,7 +729,7 @@ function getCompaniesByStage(stage, searchId) {
  * @param {string} stage - New pipeline stage
  */
 function updatePipelineStage(id, stage) {
-  const validStages = ['raw', 'no_website', 'enriched', 'qualified', 'ready', 'parked'];
+  const validStages = ['raw', 'no_website', 'enriched', 'qualified', 'parked'];
   if (!validStages.includes(stage)) {
     throw new Error(`Invalid pipeline stage: ${stage}`);
   }
