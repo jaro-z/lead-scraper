@@ -122,6 +122,39 @@ db.exec(`UPDATE companies SET pipeline_stage = 'qualified' WHERE pipeline_stage 
 // Migration: Fix companies without website stuck in 'raw' stage
 db.exec(`UPDATE companies SET pipeline_stage = 'no_website' WHERE (pipeline_stage = 'raw' OR pipeline_stage IS NULL) AND (website IS NULL OR website = '')`);
 
+// Migration: Backfill orphaned manually-added companies into the "Manual adds" search
+// so they become visible on the dashboard. Idempotent — INSERT OR IGNORE + count refresh.
+(() => {
+  const orphans = db.prepare(`
+    SELECT c.id FROM companies c
+    LEFT JOIN search_companies sc ON sc.company_id = c.id
+    WHERE c.place_id LIKE 'manual_%' AND sc.company_id IS NULL
+  `).all();
+  if (orphans.length === 0) return;
+
+  let manualSearch = db.prepare(`SELECT id FROM searches WHERE query = 'Manual adds' LIMIT 1`).get();
+  if (!manualSearch) {
+    const result = db.prepare(`
+      INSERT INTO searches (query, location, grid_size, status, result_count)
+      VALUES ('Manual adds', 'Manual entries', '-', 'completed', 0)
+    `).run();
+    manualSearch = { id: result.lastInsertRowid };
+  }
+
+  const linkStmt = db.prepare(`INSERT OR IGNORE INTO search_companies (search_id, company_id) VALUES (?, ?)`);
+  for (const row of orphans) {
+    linkStmt.run(manualSearch.id, row.id);
+  }
+
+  db.prepare(`
+    UPDATE searches
+    SET result_count = (SELECT COUNT(*) FROM search_companies WHERE search_id = ?)
+    WHERE id = ?
+  `).run(manualSearch.id, manualSearch.id);
+
+  console.log(`[migration] Linked ${orphans.length} orphaned manual company(ies) into "Manual adds" search (id ${manualSearch.id})`);
+})();
+
 // Contact enrichment columns
 addColumnIfMissing('contacts', 'phone', 'TEXT');
 addColumnIfMissing('contacts', 'email_valid', 'INTEGER');
@@ -208,11 +241,13 @@ function upsertCompany(company, searchId) {
     companyId = result.lastInsertRowid;
   }
 
-  // Link to search
-  db.prepare(`
-    INSERT OR IGNORE INTO search_companies (search_id, company_id)
-    VALUES (?, ?)
-  `).run(searchId, companyId);
+  // Link to search (skip for manually-added companies with no search)
+  if (searchId != null) {
+    db.prepare(`
+      INSERT OR IGNORE INTO search_companies (search_id, company_id)
+      VALUES (?, ?)
+    `).run(searchId, companyId);
+  }
 
   // Auto-assign pipeline stage based on website presence
   if (!company.website) {

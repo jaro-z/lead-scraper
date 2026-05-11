@@ -316,6 +316,94 @@ app.post('/api/companies/bulk-delete', asyncHandler((req, res) => {
   res.json({ success: true, deleted: ids.length });
 }));
 
+// Get or create the singleton "Manual adds" search folder.
+// All URL-based manual additions get linked to this one search so they appear
+// on the dashboard as a normal search card.
+function getOrCreateManualSearchId() {
+  const row = db.db.prepare(
+    `SELECT id FROM searches WHERE query = 'Manual adds' LIMIT 1`
+  ).get();
+  if (row) return row.id;
+
+  const result = db.db.prepare(`
+    INSERT INTO searches (query, location, grid_size, status, result_count)
+    VALUES ('Manual adds', 'Manual entries', '-', 'completed', 0)
+  `).run();
+  return result.lastInsertRowid;
+}
+
+// Manually add a single company by URL (no Google Places search).
+// Returns the new company id so the frontend can chain /enrich-full.
+app.post('/api/companies/manual', asyncHandler((req, res) => {
+  const { website, name } = req.body || {};
+
+  if (!website || typeof website !== 'string' || !website.trim()) {
+    return res.status(400).json({ error: 'website is required' });
+  }
+
+  let domain;
+  try {
+    domain = validateAndExtractDomain(website);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  // Duplicate check: match any existing company whose website resolves to the same domain
+  const existing = db.db.prepare(`SELECT id, name, website FROM companies WHERE website IS NOT NULL`).all();
+  const match = existing.find(row => {
+    try {
+      return extractDomain(row.website) === domain;
+    } catch {
+      return false;
+    }
+  });
+  if (match) {
+    return res.status(409).json({
+      error: 'already_exists',
+      company_id: match.id,
+      company_name: match.name || domain
+    });
+  }
+
+  // Normalize website to include protocol so downstream fetchers work
+  const normalizedWebsite = website.trim().startsWith('http')
+    ? website.trim()
+    : `https://${website.trim()}`;
+
+  const manualSearchId = getOrCreateManualSearchId();
+
+  const { companyId } = db.upsertCompany({
+    place_id: `manual_${Date.now()}`,
+    name: (name && name.trim()) || domain,
+    address: null,
+    category: null,
+    website: normalizedWebsite,
+    google_maps_url: null,
+    rating: null,
+    rating_count: null,
+    phone: null,
+    opening_hours: null,
+    price_level: null,
+    business_status: null,
+    lat: null,
+    lng: null,
+    photos: null,
+    types: null,
+    raw_data: null
+  }, manualSearchId);
+
+  // Bump the Manual adds search result_count so the dashboard card reflects the total
+  db.db.prepare(`
+    UPDATE searches
+    SET result_count = (
+      SELECT COUNT(*) FROM search_companies WHERE search_id = ?
+    )
+    WHERE id = ?
+  `).run(manualSearchId, manualSearchId);
+
+  res.json({ company_id: companyId, domain, website: normalizedWebsite, search_id: manualSearchId });
+}));
+
 // ============ Export ============
 
 // Export contacts with company info (one row per contact, or one row per company if no contacts)
